@@ -519,18 +519,95 @@ impl Db {
     }
 
     pub fn apply_changes(&self, changes: &[Change]) -> anyhow::Result<()> {
+        self.apply_remote_changes(changes)
+    }
+
+    pub fn apply_remote_changes(&self, changes: &[Change]) -> anyhow::Result<()> {
+        // This is a fallback that shouldn't be used for new code
+        // Use apply_remote_changes_with_author instead
+        self.apply_remote_changes_with_author(changes, "unknown")
+    }
+
+    pub fn apply_remote_changes_with_author(&self, changes: &[Change], remote_author: &str) -> anyhow::Result<()> {
         let mut conn = self.conn.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
         let tx = conn.transaction()?;
 
-        for change in changes {
-            // Skip changes from the same author to avoid conflicts
-            if let Ok(transaction) = self.get_transaction_by_id(&tx, &change.transaction_id) {
-                if transaction.author == self.author {
-                    continue; // Skip our own changes
-                }
-            }
+        // Group changes by transaction to preserve transaction information
+        let mut transactions_to_insert = std::collections::HashMap::new();
+        let mut changes_to_apply = Vec::new();
 
-            // Apply the change based on its type
+        for change in changes {
+            // Check if we already have this transaction
+            if let Ok(existing_transaction) = self.get_transaction_by_id(&tx, &change.transaction_id) {
+                // Skip changes from our own author to avoid conflicts
+                if existing_transaction.author == self.author {
+                    continue;
+                }
+                // Transaction already exists, just queue the change for application
+                changes_to_apply.push(change);
+            } else {
+                // Transaction doesn't exist, we need to create it with original author info
+                // Extract timestamp from UUIDv7 transaction ID
+                let timestamp = if let Ok(uuid) = uuid::Uuid::parse_str(&change.transaction_id) {
+                    if uuid.get_version() == Some(uuid::Version::SortRand) {
+                        // Extract timestamp from UUIDv7 (first 48 bits are milliseconds since Unix epoch)
+                        let bytes = uuid.as_bytes();
+                        let timestamp_ms = u64::from_be_bytes([
+                            0, 0, // pad to 8 bytes
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+                        ]);
+                        timestamp_ms as i64
+                    } else {
+                        // Fallback to current time
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as i64
+                    }
+                } else {
+                    // Fallback to current time
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64
+                };
+
+                let transaction = Transaction {
+                    id: change.transaction_id.clone(),
+                    timestamp,
+                    author: remote_author.to_string(), // Preserve original author
+                    bundle_id: None,
+                };
+                transactions_to_insert.insert(change.transaction_id.clone(), transaction);
+                changes_to_apply.push(change);
+            }
+        }
+
+        // Insert new transactions
+        for (_, transaction) in transactions_to_insert {
+            tx.execute(
+                "INSERT OR IGNORE INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)",
+                rusqlite::params![transaction.id, transaction.timestamp, transaction.author, transaction.bundle_id],
+            )?;
+        }
+
+        // Insert change records and apply entity changes
+        for change in changes_to_apply {
+            // Insert the change record (preserve original change ID and transaction ID)
+            tx.execute(
+                "INSERT OR IGNORE INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    change.id,
+                    change.transaction_id,
+                    change.entity_type,
+                    change.entity_key,
+                    change.change_type,
+                    change.old_values,
+                    change.new_values,
+                ],
+            )?;
+
+            // Apply the entity change
             match change.change_type.as_str() {
                 "Insert" => self.apply_insert_change(&tx, change)?,
                 "Update" => self.apply_update_change(&tx, change)?,
@@ -619,6 +696,19 @@ impl Db {
              ORDER BY timestamp ASC",
             &[&timestamp],
         )
+    }
+
+    pub fn get_latest_timestamp_for_author(&self, author: &str) -> anyhow::Result<i64> {
+        let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        let mut stmt = conn.prepare("SELECT MAX(timestamp) FROM _transaction WHERE author = ?")?;
+        let mut rows = stmt.query([author])?;
+        
+        if let Some(row) = rows.next()? {
+            let timestamp: Option<i64> = row.get(0)?;
+            Ok(timestamp.unwrap_or(0))
+        } else {
+            Ok(0)
+        }
     }
 
     fn extract_table_dependencies(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<HashSet<String>> {

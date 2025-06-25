@@ -238,24 +238,21 @@ impl SyncClient {
         log::info!("Starting sync for author {}", db.get_author());
 
         // 1. Pull changes from other authors
-        let remote_changes = self.pull_remote_changes(db.get_author())?;
+        let remote_changes = self.pull_remote_changes(db.get_author(), db)?;
 
         // 2. Apply remote changes to local database
         self.apply_remote_changes(db, &remote_changes)?;
 
-        // 3. Get all local changes and push them
-        let local_changes = db.get_all_changes()?;
-        if !local_changes.is_empty() {
-            self.push_local_changes(&local_changes, db.get_author())?;
-        }
+        // 3. Get new local changes since last push and push them
+        self.push_new_changes(db)?;
 
         log::info!("Sync completed successfully");
         Ok(())
     }
 
 
-    fn pull_remote_changes(&self, our_author: &str) -> Result<Vec<ChangeBundle>> {
-        log::info!("Pulling all remote changes");
+    fn pull_remote_changes(&self, our_author: &str, db: &Db) -> Result<Vec<ChangeBundle>> {
+        log::info!("Pulling incremental remote changes");
         
         // List all authors (directories) in the bucket
         let authors_prefix = if self.config.base_path.is_empty() {
@@ -273,12 +270,28 @@ impl SyncClient {
                 continue;
             }
 
-            // Get all changes from this author
-            let author_changes = self.get_author_changes(&author_dir)?;
-            all_changes.extend(author_changes);
+            // Extract author name from path
+            let author_name = if let Some(author) = author_dir.trim_end_matches('/').split('/').last() {
+                author
+            } else {
+                continue;
+            };
+
+            // Get the latest timestamp we have locally for this author
+            let latest_local_timestamp = db.get_latest_timestamp_for_author(author_name)?;
+            
+            log::info!("Latest local timestamp for author {}: {}", author_name, latest_local_timestamp);
+
+            // Get only changes since our latest local timestamp
+            let author_changes = self.get_author_changes_since(&author_dir, latest_local_timestamp)?;
+            
+            if !author_changes.is_empty() {
+                log::info!("Found {} new change bundles from author {}", author_changes.len(), author_name);
+                all_changes.extend(author_changes);
+            }
         }
 
-        log::info!("Pulled {} change bundles from remote authors", all_changes.len());
+        log::info!("Pulled {} new change bundles from remote authors", all_changes.len());
         Ok(all_changes)
     }
 
@@ -301,22 +314,43 @@ impl SyncClient {
         Ok(bundles)
     }
 
+    fn get_author_changes_since(&self, author_path: &str, since_timestamp: i64) -> Result<Vec<ChangeBundle>> {
+        // List change files for this author
+        let change_files = self.storage.list(author_path)?;
+        let mut bundles = Vec::new();
+
+        for file_path in change_files {
+            if !file_path.ends_with(".json") {
+                continue;
+            }
+
+            // Check if this file is newer than our latest timestamp
+            if let Some(filename) = file_path.split('/').last() {
+                if let Ok(file_timestamp) = self.parse_timestamp_from_filename(filename) {
+                    if file_timestamp <= since_timestamp {
+                        continue; // Skip this file, we already have these changes
+                    }
+                }
+            }
+
+            // Download and parse the change bundle
+            let content = self.storage.get(&file_path)?;
+            let bundle: ChangeBundle = serde_json::from_str(&content)?;
+            bundles.push(bundle);
+        }
+
+        Ok(bundles)
+    }
+
     fn apply_remote_changes(&self, db: &Db, change_bundles: &[ChangeBundle]) -> Result<()> {
         log::info!("Applying {} change bundles", change_bundles.len());
 
-        // Collect all changes and sort by timestamp for proper ordering
-        let mut all_changes = Vec::new();
+        // Apply each bundle separately to preserve author information
         for bundle in change_bundles {
-            all_changes.extend(bundle.changes.clone());
-        }
-
-        // Sort by change ID (UUIDv7 provides global ordering)
-        all_changes.sort_by(|a, b| a.id.cmp(&b.id));
-
-        // Apply changes to the database
-        if !all_changes.is_empty() {
-            db.apply_changes(&all_changes)?;
-            log::info!("Successfully applied {} changes", all_changes.len());
+            if !bundle.changes.is_empty() {
+                db.apply_remote_changes_with_author(&bundle.changes, &bundle.author)?;
+                log::info!("Successfully applied {} changes from author {}", bundle.changes.len(), bundle.author);
+            }
         }
         
         Ok(())
@@ -392,6 +426,68 @@ impl SyncClient {
         
         // If we can't extract timestamp from UUIDv7, this is an error
         Err(anyhow::anyhow!("Failed to extract timestamp from change ID: {}", change.id))
+    }
+
+    fn parse_timestamp_from_filename(&self, filename: &str) -> Result<i64> {
+        // Parse timestamp from filename format: changes-YYYY-MM-DD-HHMMSS.json
+        if !filename.starts_with("changes-") || !filename.ends_with(".json") {
+            return Err(anyhow::anyhow!("Invalid filename format: {}", filename));
+        }
+        
+        let timestamp_str = filename
+            .strip_prefix("changes-")
+            .and_then(|s| s.strip_suffix(".json"))
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract timestamp from filename: {}", filename))?;
+        
+        // Parse YYYY-MM-DD-HHMMSS format
+        let parsed_time = chrono::NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d-%H%M%S")?;
+        Ok(parsed_time.and_utc().timestamp_millis())
+    }
+
+    fn get_latest_pushed_timestamp(&self, author: &str) -> Result<i64> {
+        // List files for this author to find the latest pushed timestamp
+        let author_prefix = if self.config.base_path.is_empty() {
+            format!("authors/{}/", author)
+        } else {
+            format!("{}/authors/{}/", self.config.base_path, author)
+        };
+        
+        let files = self.storage.list(&author_prefix)?;
+        let mut latest_timestamp = 0i64;
+        
+        for file_path in files {
+            if let Some(filename) = file_path.split('/').last() {
+                if let Ok(timestamp) = self.parse_timestamp_from_filename(filename) {
+                    latest_timestamp = latest_timestamp.max(timestamp);
+                }
+            }
+        }
+        
+        Ok(latest_timestamp)
+    }
+
+    fn push_new_changes(&self, db: &Db) -> Result<()> {
+        let author = db.get_author();
+        
+        // Get the timestamp of the latest pushed file for this author
+        let latest_pushed_timestamp = self.get_latest_pushed_timestamp(author)?;
+        
+        log::info!("Latest pushed timestamp for author {}: {}", author, latest_pushed_timestamp);
+        
+        // Get changes since the latest pushed timestamp
+        let new_changes = db.get_changes_since(latest_pushed_timestamp)?;
+        
+        if new_changes.is_empty() {
+            log::info!("No new changes to push for author {}", author);
+            return Ok(());
+        }
+        
+        log::info!("Found {} new changes to push for author {}", new_changes.len(), author);
+        
+        // Push only the new changes
+        self.push_local_changes(&new_changes, author)?;
+        
+        Ok(())
     }
 
 }
