@@ -11,3 +11,4 @@ rusqlite = { version = "0.36.0" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_rusqlite = "0.39.1"
 uuid = { version = "1.17.0", features = ["v7"] }
+serde_json = "1.0.140"

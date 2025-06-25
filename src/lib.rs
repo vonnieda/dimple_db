@@ -1,2 +1,3 @@
 pub mod db;
-mod struct_name;
+
+pub use db::{Entity, Db};
