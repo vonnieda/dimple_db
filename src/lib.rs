@@ -1,3 +1,3 @@
 pub mod db;
 pub mod notifier;
-pub use db::{Entity, Db};
+pub use db::{Entity, Db, QueryResult};

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::sync::mpsc::Receiver;
 
 use rusqlite::Connection;
@@ -62,6 +62,55 @@ pub struct QueryChange<T> {
     pub new_result: QueryResult<T>,
 }
 
+pub struct QueryObserver {
+    subscription_id: String,
+    db: Weak<RwLock<HashMap<String, QuerySubscription>>>,
+}
+
+impl Drop for QueryObserver {
+    fn drop(&mut self) {
+        if let Some(subscriptions) = self.db.upgrade() {
+            if let Ok(mut subs) = subscriptions.write() {
+                subs.remove(&self.subscription_id);
+            }
+        }
+    }
+}
+
+pub struct QuerySubscriber<T> {
+    subscription_id: String,
+    db: Weak<RwLock<HashMap<String, QuerySubscription>>>,
+    _receiver: Receiver<QueryResult<T>>,
+}
+
+impl<T> Drop for QuerySubscriber<T> {
+    fn drop(&mut self) {
+        if let Some(subscriptions) = self.db.upgrade() {
+            if let Ok(mut subs) = subscriptions.write() {
+                subs.remove(&self.subscription_id);
+            }
+        }
+    }
+}
+
+impl<T> QuerySubscriber<T> {
+    pub fn recv(&self) -> Result<QueryResult<T>, std::sync::mpsc::RecvError> {
+        self._receiver.recv()
+    }
+    
+    pub fn recv_timeout(&self, timeout: std::time::Duration) -> Result<QueryResult<T>, std::sync::mpsc::RecvTimeoutError> {
+        self._receiver.recv_timeout(timeout)
+    }
+    
+    pub fn try_recv(&self) -> Result<QueryResult<T>, std::sync::mpsc::TryRecvError> {
+        self._receiver.try_recv()
+    }
+
+    pub fn iter(&self) -> std::sync::mpsc::Iter<QueryResult<T>> {
+        self._receiver.iter()
+    }
+}
+
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<RwLock<Connection>>,
@@ -88,44 +137,42 @@ impl Db {
     }
 
     fn init_connection(&self) -> anyhow::Result<()> {
-        if let Ok(conn) = self.conn.write() {
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-            conn.pragma_update(None, "foreign_keys", "ON")?;
-        }
+        let conn = self.conn.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock for connection init"))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(())
     }
 
     fn init_change_tracking_tables(&self) -> anyhow::Result<()> {
-        if let Ok(conn) = self.conn.write() {
-            conn.execute_batch("
-                CREATE TABLE IF NOT EXISTS _metadata (
-                    key TEXT NOT NULL PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
+        let conn = self.conn.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock for change tracking init"))?;
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS _metadata (
+                key TEXT NOT NULL PRIMARY KEY,
+                value TEXT NOT NULL
+            );
 
-                CREATE TABLE IF NOT EXISTS _transaction (
-                    id TEXT NOT NULL PRIMARY KEY,
-                    timestamp INTEGER NOT NULL,
-                    author TEXT NOT NULL,
-                    bundle_id TEXT
-                );
+            CREATE TABLE IF NOT EXISTS _transaction (
+                id TEXT NOT NULL PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                author TEXT NOT NULL,
+                bundle_id TEXT
+            );
 
-                CREATE TABLE IF NOT EXISTS _change (
-                    id TEXT NOT NULL PRIMARY KEY,
-                    transaction_id TEXT NOT NULL,
-                    entity_type TEXT NOT NULL,
-                    entity_key TEXT NOT NULL,
-                    change_type TEXT NOT NULL,
-                    old_values TEXT,
-                    new_values TEXT,
-                    FOREIGN KEY (transaction_id) REFERENCES _transaction(id)
-                );
+            CREATE TABLE IF NOT EXISTS _change (
+                id TEXT NOT NULL PRIMARY KEY,
+                transaction_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                old_values TEXT,
+                new_values TEXT,
+                FOREIGN KEY (transaction_id) REFERENCES _transaction(id)
+            );
 
-                CREATE INDEX IF NOT EXISTS idx_change_transaction_id ON _change(transaction_id);
-                CREATE INDEX IF NOT EXISTS idx_change_entity ON _change(entity_type, entity_key);
-                CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON _transaction(timestamp);
-            ")?;
-        }
+            CREATE INDEX IF NOT EXISTS idx_change_transaction_id ON _change(transaction_id);
+            CREATE INDEX IF NOT EXISTS idx_change_entity ON _change(entity_type, entity_key);
+            CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON _transaction(timestamp);
+        ")?;
         Ok(())
     }
 
@@ -174,15 +221,18 @@ impl Db {
 
     pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
         let table_name = self.struct_name(entity)?;
-        let final_entity = self.ensure_entity_has_key(entity)?;
+        
+        // Convert to JSON once at the start
+        let mut entity_json = serde_json::to_value(entity)?;
+        self.ensure_entity_has_key_json(&mut entity_json)?;
         
         let mut conn = self.conn.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
         let tx = conn.transaction()?;
         
         let table_columns = self.get_table_columns(&tx, &table_name)?;
-        let all_params = serde_rusqlite::to_params_named(&final_entity)?;
+        let all_params = serde_rusqlite::to_params_named(&entity_json)?;
         
-        let key_value = self.extract_key_value(&final_entity)?;
+        let key_value = self.extract_key_value_from_json(&entity_json)?;
         let exists = self.record_exists(&tx, &table_name, &key_value)?;
         
         // Capture old values for change tracking
@@ -200,8 +250,8 @@ impl Db {
             ChangeType::Insert
         };
         
-        // Record change
-        let new_values = serde_json::to_string(&final_entity)?;
+        // Record change - reuse the JSON string
+        let new_values = serde_json::to_string(&entity_json)?;
         self.record_change(&tx, &table_name, &key_value, change_type, old_values, Some(new_values))?;
         
         tx.commit()?;
@@ -212,13 +262,13 @@ impl Db {
         // Trigger reactive query notifications after successful commit and lock release
         self.notify_query_subscribers(&table_name, &key_value)?;
         
+        // Convert back to T for return
+        let final_entity: T = serde_json::from_value(entity_json)?;
         Ok(final_entity)
     }
     
     
-    fn ensure_entity_has_key<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
-        let mut entity_json = serde_json::to_value(entity)?;
-        
+    fn ensure_entity_has_key_json(&self, entity_json: &mut serde_json::Value) -> anyhow::Result<()> {
         // Generate a key if it doesn't exist or is empty
         let needs_key = match entity_json.get("key") {
             Some(key) => key.is_null() || (key.is_string() && key.as_str() == Some("")),
@@ -229,18 +279,19 @@ impl Db {
             entity_json["key"] = serde_json::Value::String(Uuid::now_v7().to_string());
         }
         
-        Ok(serde_json::from_value(entity_json)?)
+        Ok(())
     }
     
     
-    fn extract_key_value<T: Entity>(&self, entity: &T) -> anyhow::Result<String> {
-        let entity_json = serde_json::to_value(entity)?;
+    
+    fn extract_key_value_from_json(&self, entity_json: &serde_json::Value) -> anyhow::Result<String> {
         entity_json
             .get("key")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("Entity missing required 'key' field"))
     }
+    
     
     fn record_exists(&self, tx: &rusqlite::Transaction, table_name: &str, key: &str) -> anyhow::Result<bool> {
         let sql = format!("SELECT 1 FROM {} WHERE key = ? LIMIT 1", table_name);
@@ -371,29 +422,9 @@ impl Db {
         let mut rows = stmt.query([key])?;
         
         if let Some(row) = rows.next()? {
-            // Convert SQLite row to JSON
-            let column_count = row.as_ref().column_count();
-            let mut json_map = serde_json::Map::new();
-            
-            for i in 0..column_count {
-                let column_name = row.as_ref().column_name(i)?;
-                let value: rusqlite::types::Value = row.get(i)?;
-                
-                let json_value = match value {
-                    rusqlite::types::Value::Null => serde_json::Value::Null,
-                    rusqlite::types::Value::Integer(i) => serde_json::Value::Number(i.into()),
-                    rusqlite::types::Value::Real(f) => serde_json::Value::Number(
-                        serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0))
-                    ),
-                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
-                    // TODO need to look closer at this
-                    rusqlite::types::Value::Blob(_) => serde_json::Value::String("<binary>".to_string()),
-                };
-                
-                json_map.insert(column_name.to_string(), json_value);
-            }
-            
-            Ok(serde_json::to_string(&json_map)?)
+            // Use serde_rusqlite to convert row to JSON Value, then to string
+            let json_value: serde_json::Value = serde_rusqlite::from_row(row)?;
+            Ok(serde_json::to_string(&json_value)?)
         } else {
             Err(anyhow::anyhow!("Record not found"))
         }
@@ -543,6 +574,16 @@ impl Db {
         None
     }
 
+    fn calculate_result_hash_from_json(&self, data: &[serde_json::Value]) -> anyhow::Result<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        let json_str = serde_json::to_string(data)?;
+        json_str.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+
     fn calculate_result_hash<T: Entity>(&self, data: &[T]) -> anyhow::Result<u64> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -558,18 +599,35 @@ impl Db {
         Ok(hasher.finish())
     }
 
+    fn extract_keys_from_json_results(&self, data: &[serde_json::Value]) -> anyhow::Result<HashSet<String>> {
+        let mut keys = HashSet::new();
+        
+        for item in data {
+            if let Some(obj) = item.as_object() {
+                if let Some(key_value) = obj.get("key") {
+                    if let Some(key_str) = key_value.as_str() {
+                        keys.insert(key_str.to_string());
+                    }
+                }
+            }
+        }
+        
+        Ok(keys)
+    }
+
     fn extract_keys_from_results<T: Entity>(&self, data: &[T]) -> anyhow::Result<HashSet<String>> {
         let mut keys = HashSet::new();
         
         for item in data {
-            let key = self.extract_key_value(item)?;
+            let entity_json = serde_json::to_value(item)?;
+            let key = self.extract_key_value_from_json(&entity_json)?;
             keys.insert(key);
         }
         
         Ok(keys)
     }
 
-    pub fn subscribe_to_query<T: Entity + Send + 'static>(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<Receiver<QueryResult<T>>> {
+    pub fn subscribe_to_query<T: Entity + Send + 'static>(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<QuerySubscriber<T>> {
         // Generate unique subscription ID
         let subscription_id = Uuid::now_v7().to_string();
         
@@ -581,11 +639,10 @@ impl Db {
         let initial_keys = self.extract_keys_from_results(&initial_results)?;
         let initial_hash = self.calculate_result_hash(&initial_results)?;
         
-        // Serialize parameters for storage (simplified for now)
+        // Serialize parameters for storage
         let serialized_params: Vec<String> = params.iter()
-            .enumerate()
-            .map(|(i, _)| format!("param_{}", i)) // Placeholder - proper param serialization would be more complex
-            .collect();
+            .map(|p| self.serialize_tosql_param(p))
+            .collect::<Result<Vec<_>, _>>()?;
         
         // Create subscription
         let subscription = QuerySubscription {
@@ -643,24 +700,98 @@ impl Db {
             }
         });
         
-        Ok(filtered_rx)
+        Ok(QuerySubscriber {
+            subscription_id,
+            db: Arc::downgrade(&self.subscriptions),
+            _receiver: filtered_rx,
+        })
+    }
+
+    pub fn observe_query<T: Entity + Send + 'static>(
+        &self, 
+        sql: &str, 
+        params: &[&dyn rusqlite::ToSql],
+        mut callback: impl FnMut(QueryResult<T>) + Send + 'static
+    ) -> anyhow::Result<QueryObserver> {
+        // Generate unique subscription ID
+        let subscription_id = Uuid::now_v7().to_string();
+        
+        // Extract table dependencies using EXPLAIN QUERY PLAN
+        let dependent_tables = self.extract_table_dependencies(sql, params)?;
+        
+        // Execute the query to get initial results
+        let initial_results: Vec<T> = self.query(sql, params)?;
+        let initial_keys = self.extract_keys_from_results(&initial_results)?;
+        let initial_hash = self.calculate_result_hash(&initial_results)?;
+        
+        // Serialize parameters for storage
+        let serialized_params: Vec<String> = params.iter()
+            .map(|p| self.serialize_tosql_param(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        
+        // Create subscription
+        let subscription = QuerySubscription {
+            id: subscription_id.clone(),
+            sql: sql.to_string(),
+            params: serialized_params,
+            dependent_tables,
+            last_result_keys: initial_keys.clone(),
+            last_result_hash: initial_hash,
+        };
+        
+        // Store subscription
+        {
+            let mut subscriptions = self.subscriptions.write()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions"))?;
+            subscriptions.insert(subscription_id.clone(), subscription);
+        }
+        
+        // Create initial result and deliver it immediately
+        let initial_query_result = QueryResult {
+            data: initial_results,
+            keys: initial_keys,
+            hash: initial_hash,
+        };
+        
+        // Deliver initial result
+        callback(initial_query_result);
+        
+        // Set up ongoing observation for future changes
+        let target_subscription_id = subscription_id.clone();
+        self.query_notifier.observe(move |notification| {
+            if let Some(obj) = notification.as_object() {
+                if let Some(sub_id) = obj.get("subscription_id").and_then(|v| v.as_str()) {
+                    if sub_id == target_subscription_id {
+                        if let Some(result_value) = obj.get("result") {
+                            if let Ok(query_result) = serde_json::from_value::<QueryResult<T>>(result_value.clone()) {
+                                callback(query_result);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        // Return cleanup handle
+        Ok(QueryObserver {
+            subscription_id,
+            db: Arc::downgrade(&self.subscriptions),
+        })
     }
 
     fn notify_query_subscribers(&self, changed_table: &str, changed_key: &str) -> anyhow::Result<()> {
         // Get a snapshot of affected subscriptions
         let affected_subscriptions = {
-            if let Ok(subs) = self.subscriptions.read() {
-                subs.iter()
-                    .filter(|(_, subscription)| {
-                        subscription.dependent_tables.contains(changed_table) ||
-                        subscription.dependent_tables.contains(&changed_table.to_uppercase()) ||
-                        subscription.last_result_keys.contains(changed_key)
-                    })
-                    .map(|(id, sub)| (id.clone(), sub.clone()))
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            }
+            let subs = self.subscriptions.read()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire read lock on subscriptions"))?;
+            subs.iter()
+                .filter(|(_, subscription)| {
+                    subscription.dependent_tables.contains(changed_table) ||
+                    subscription.dependent_tables.contains(&changed_table.to_uppercase()) ||
+                    subscription.last_result_keys.contains(changed_key)
+                })
+                .map(|(id, sub)| (id.clone(), sub.clone()))
+                .collect::<Vec<_>>()
         }; // Lock released here
 
         // Process affected subscriptions without holding the subscription lock
@@ -674,21 +805,23 @@ impl Db {
 
     fn check_and_notify_subscription(&self, subscription_id: &str, subscription: &QuerySubscription) -> anyhow::Result<()> {
         // Re-execute the query to get current results
-        let results: Vec<serde_json::Value> = self.query_as_json(&subscription.sql)?;
+        let params = self.deserialize_params(&subscription.params)?;
+        let results: Vec<serde_json::Value> = self.query_as_json_with_params(&subscription.sql, &params)?;
         
         // Calculate new hash and keys
-        let new_hash = self.calculate_json_hash(&results)?;
+        let new_hash = self.calculate_result_hash_from_json(&results)?;
         let new_keys = self.extract_keys_from_json_results(&results)?;
 
         // Check if results have changed (compare with subscription state)
         if new_hash != subscription.last_result_hash || new_keys != subscription.last_result_keys {
             // Update subscription with new state - acquire lock briefly
-            if let Ok(mut subscriptions) = self.subscriptions.write() {
-                if let Some(sub) = subscriptions.get_mut(subscription_id) {
-                    sub.last_result_hash = new_hash;
-                    sub.last_result_keys = new_keys.clone();
-                }
-            } // Lock released here
+            let mut subscriptions = self.subscriptions.write()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions for update"))?;
+            if let Some(sub) = subscriptions.get_mut(subscription_id) {
+                sub.last_result_hash = new_hash;
+                sub.last_result_keys = new_keys.clone();
+            }
+            drop(subscriptions); // Explicitly release lock
 
             // Create result object (generic JSON for now)
             let query_result = serde_json::json!({
@@ -710,10 +843,11 @@ impl Db {
         Ok(())
     }
 
-    fn query_as_json(&self, sql: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+
+    fn query_as_json_with_params(&self, sql: &str, params: &[rusqlite::types::Value]) -> anyhow::Result<Vec<serde_json::Value>> {
         let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
         let mut stmt = conn.prepare(sql)?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
         
         let mut results = Vec::new();
         while let Some(row) = rows.next()? {
@@ -743,30 +877,56 @@ impl Db {
         Ok(results)
     }
 
-    fn calculate_json_hash(&self, data: &[serde_json::Value]) -> anyhow::Result<u64> {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+
+    fn serialize_tosql_param(&self, param: &dyn rusqlite::ToSql) -> anyhow::Result<String> {
+        // Convert ToSql parameter to a serializable string representation
+        // We use SQLite's value conversion to get a consistent representation
+        let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        let mut stmt = conn.prepare("SELECT ?")?;
+        let mut rows = stmt.query([param])?;
         
-        let mut hasher = DefaultHasher::new();
-        let json_str = serde_json::to_string(data)?;
-        json_str.hash(&mut hasher);
-        Ok(hasher.finish())
+        if let Some(row) = rows.next()? {
+            let value: rusqlite::types::Value = row.get(0)?;
+            Ok(match value {
+                rusqlite::types::Value::Null => "NULL".to_string(),
+                rusqlite::types::Value::Integer(i) => format!("INT:{}", i),
+                rusqlite::types::Value::Real(f) => format!("REAL:{}", f),
+                rusqlite::types::Value::Text(s) => format!("TEXT:{}", s),
+                rusqlite::types::Value::Blob(_) => return Err(anyhow::anyhow!("Blob parameters not supported")),
+            })
+        } else {
+            Err(anyhow::anyhow!("Failed to serialize parameter"))
+        }
     }
 
-    fn extract_keys_from_json_results(&self, data: &[serde_json::Value]) -> anyhow::Result<HashSet<String>> {
-        let mut keys = HashSet::new();
-        
-        for item in data {
-            if let Some(obj) = item.as_object() {
-                if let Some(key_value) = obj.get("key") {
-                    if let Some(key_str) = key_value.as_str() {
-                        keys.insert(key_str.to_string());
-                    }
+    fn deserialize_params(&self, serialized_params: &[String]) -> anyhow::Result<Vec<rusqlite::types::Value>> {
+        serialized_params.iter()
+            .map(|s| {
+                if s == "NULL" {
+                    Ok(rusqlite::types::Value::Null)
+                } else if let Some(int_str) = s.strip_prefix("INT:") {
+                    Ok(rusqlite::types::Value::Integer(int_str.parse()?))
+                } else if let Some(real_str) = s.strip_prefix("REAL:") {
+                    Ok(rusqlite::types::Value::Real(real_str.parse()?))
+                } else if let Some(text_str) = s.strip_prefix("TEXT:") {
+                    Ok(rusqlite::types::Value::Text(text_str.to_string()))
+                } else {
+                    Err(anyhow::anyhow!("Invalid parameter format: {}", s))
                 }
-            }
-        }
-        
-        Ok(keys)
+            })
+            .collect()
+    }
+
+    pub fn get_subscription_count(&self) -> anyhow::Result<usize> {
+        let subscriptions = self.subscriptions.read()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock on subscriptions"))?;
+        Ok(subscriptions.len())
+    }
+
+    pub fn remove_subscription(&self, subscription_id: &str) -> anyhow::Result<bool> {
+        let mut subscriptions = self.subscriptions.write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions"))?;
+        Ok(subscriptions.remove(subscription_id).is_some())
     }
 }
 
@@ -774,7 +934,7 @@ impl Db {
 mod tests {
     use serde::{Deserialize, Serialize};
 
-    use super::Db;
+    use super::{Db, QueryResult};
 
     #[derive(Serialize, Deserialize, Clone, Default, Debug)]
     pub struct Artist {
@@ -798,11 +958,38 @@ mod tests {
                 );
             ")?;
         }
+        
+        // Track results from reactive query
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::<QueryResult<Artist>>::new()));
+        let results_clone = results.clone();
+        
+        // Observe reactive query with callback
+        let _observer = db.observe_query::<Artist>("SELECT * FROM Artist WHERE name LIKE ?", &[&"Metal%"], move |result| {
+            if let Ok(mut r) = results_clone.lock() {
+                r.push(result);
+            }
+        })?;
+        
+        // Allow time for initial result
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Save artist - triggers reactive notification
         let artist = db.save(&Artist {
             name: "Metallica".to_string(),
             ..Default::default()
         })?;
-        dbg!(artist);
+        assert!(!artist.key.is_empty());
+        
+        // Allow time for reactive update
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Verify we received both initial and updated results
+        let r = results.lock().unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].data.len(), 0); // Initial empty result
+        assert_eq!(r[1].data.len(), 1); // Updated result with Metallica
+        assert_eq!(r[1].data[0].name, "Metallica");
+        
         Ok(())
     }
 
@@ -1231,10 +1418,10 @@ mod tests {
         }
         
         // Subscribe to a query
-        let rx = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name LIKE 'Metal%'", &[])?;
+        let subscriber = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name LIKE 'Metal%'", &[])?;
         
         // Collect initial result
-        let initial_result = rx.recv_timeout(std::time::Duration::from_millis(100))?;
+        let initial_result = subscriber.recv_timeout(std::time::Duration::from_millis(100))?;
         assert_eq!(initial_result.data.len(), 0); // No matching artists initially
         
         // Save an artist that should trigger the query
@@ -1245,7 +1432,7 @@ mod tests {
         })?;
         
         // Should receive a notification
-        let updated_result = rx.recv_timeout(std::time::Duration::from_millis(1000))?;
+        let updated_result = subscriber.recv_timeout(std::time::Duration::from_millis(1000))?;
         assert_eq!(updated_result.data.len(), 1);
         assert_eq!(updated_result.data[0].name, "Metallica");
         
@@ -1268,10 +1455,10 @@ mod tests {
         }
         
         // Subscribe to a specific query
-        let rx = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name = 'Metallica'", &[])?;
+        let subscriber = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name = 'Metallica'", &[])?;
         
         // Collect initial result
-        let initial_result = rx.recv_timeout(std::time::Duration::from_millis(100))?;
+        let initial_result = subscriber.recv_timeout(std::time::Duration::from_millis(100))?;
         assert_eq!(initial_result.data.len(), 0);
         
         // Save an artist that should trigger re-evaluation but result in same empty set
@@ -1282,7 +1469,7 @@ mod tests {
         })?;
         
         // Should receive a notification (table changed) but result set should still be empty
-        let updated_result = rx.recv_timeout(std::time::Duration::from_millis(1000))?;
+        let updated_result = subscriber.recv_timeout(std::time::Duration::from_millis(1000))?;
         assert_eq!(updated_result.data.len(), 0); // Still no matching artists
         
         Ok(())
@@ -1306,6 +1493,240 @@ mod tests {
         // Test table dependency extraction
         let tables = db.extract_table_dependencies("SELECT * FROM Artist", &[])?;
         assert!(tables.contains("ARTIST")); // SQLite normalizes to uppercase
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_subscription_management() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Initially no subscriptions
+        assert_eq!(db.get_subscription_count()?, 0);
+        
+        // Subscribe to a query
+        let _subscriber = db.subscribe_to_query::<Artist>("SELECT * FROM Artist", &[])?;
+        
+        // Should have 1 subscription
+        assert_eq!(db.get_subscription_count()?, 1);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_observe_query_callback() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Use Arc<Mutex<Vec>> to collect results from callback
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::<QueryResult<Artist>>::new()));
+        let results_clone = results.clone();
+        
+        // Observe query with callback
+        let _observer = db.observe_query::<Artist>(
+            "SELECT * FROM Artist WHERE name LIKE ?", 
+            &[&"Metal%"],
+            move |query_result| {
+                if let Ok(mut r) = results_clone.lock() {
+                    r.push(query_result);
+                }
+            }
+        )?;
+        
+        // Give callback time to process initial result
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Should have received initial empty result
+        {
+            let r = results.lock().unwrap();
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].data.len(), 0);
+        }
+        
+        // Save an artist that matches the query
+        let _artist = db.save(&Artist {
+            name: "Metallica".to_string(),
+            disambiguation: Some("American metal band".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Give callback time to process the update
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        // Should have received both initial and updated results
+        {
+            let r = results.lock().unwrap();
+            assert_eq!(r.len(), 2);
+            assert_eq!(r[0].data.len(), 0); // Initial empty result
+            assert_eq!(r[1].data.len(), 1); // Updated result with Metallica
+            assert_eq!(r[1].data[0].name, "Metallica");
+        }
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_subscription_cleanup_on_drop() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Initially no subscriptions
+        assert_eq!(db.get_subscription_count()?, 0);
+        
+        // Create subscription in inner scope
+        {
+            let _subscriber = db.subscribe_to_query::<Artist>("SELECT * FROM Artist", &[])?;
+            // Should have 1 subscription
+            assert_eq!(db.get_subscription_count()?, 1);
+        } // subscriber drops here
+        
+        // Give cleanup time to happen
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Should be cleaned up
+        assert_eq!(db.get_subscription_count()?, 0);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_observer_cleanup_on_drop() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Initially no subscriptions
+        assert_eq!(db.get_subscription_count()?, 0);
+        
+        // Create observer in inner scope
+        {
+            let _observer = db.observe_query::<Artist>(
+                "SELECT * FROM Artist WHERE name LIKE ?", 
+                &[&"Metal%"],
+                |_| {}
+            )?;
+            // Should have 1 subscription
+            assert_eq!(db.get_subscription_count()?, 1);
+        } // observer drops here
+        
+        // Give cleanup time to happen
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        
+        // Should be cleaned up
+        assert_eq!(db.get_subscription_count()?, 0);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_performance_comparison() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+                
+                CREATE TABLE Artist_Raw (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        let artist = Artist {
+            name: "Test Artist".to_string(),
+            disambiguation: Some("Test Band".to_string()),
+            ..Default::default()
+        };
+        
+        let iterations = 1000;
+        
+        // Test our optimized save() function
+        let start = std::time::Instant::now();
+        for i in 0..iterations {
+            let mut test_artist = artist.clone();
+            test_artist.name = format!("Test Artist {}", i);
+            db.save(&test_artist)?;
+        }
+        let optimized_duration = start.elapsed();
+        
+        // Test raw SQLite insert (no change tracking, no transactions)
+        let start = std::time::Instant::now();
+        {
+            let conn = db.conn.write().unwrap();
+            for i in 0..iterations {
+                let key = uuid::Uuid::now_v7().to_string();
+                let name = format!("Raw Artist {}", i);
+                conn.execute(
+                    "INSERT INTO Artist_Raw (key, name, disambiguation) VALUES (?, ?, ?)",
+                    rusqlite::params![key, name, "Raw Band"]
+                )?;
+            }
+        }
+        let raw_duration = start.elapsed();
+        
+        println!("Optimized save(): {:?}", optimized_duration);
+        println!("Raw SQLite insert: {:?}", raw_duration);
+        println!("Overhead ratio: {:.2}x", optimized_duration.as_secs_f64() / raw_duration.as_secs_f64());
+        
+        // Verify we have the expected number of records
+        let optimized_count: i64 = {
+            let conn = db.conn.read().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM Artist", [], |row| row.get(0))?
+        };
+        let raw_count: i64 = {
+            let conn = db.conn.read().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM Artist_Raw", [], |row| row.get(0))?
+        };
+        
+        assert_eq!(optimized_count, iterations as i64);
+        assert_eq!(raw_count, iterations as i64);
         
         Ok(())
     }
