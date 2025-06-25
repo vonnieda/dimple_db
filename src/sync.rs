@@ -31,6 +31,7 @@ impl S3Storage {
 
 impl Storage for S3Storage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let results = self.bucket.list(prefix.to_string(), Some("/".to_string()))?;
         let mut keys = Vec::new();
         
@@ -40,17 +41,23 @@ impl Storage for S3Storage {
             }
         }
         
+        log::debug!("STORAGE LIST RESULT: {} items", keys.len());
         Ok(keys)
     }
 
     fn get(&self, path: &str) -> Result<String> {
+        log::debug!("STORAGE GET: path='{}'", path);
         let response = self.bucket.get_object(path)?;
         let bytes = response.bytes();
-        Ok(String::from_utf8(bytes.to_vec())?)
+        let content = String::from_utf8(bytes.to_vec())?;
+        log::debug!("STORAGE GET RESULT: {} bytes", content.len());
+        Ok(content)
     }
 
     fn put(&self, path: &str, content: &str) -> Result<()> {
+        log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
         self.bucket.put_object(path, content.as_bytes())?;
+        log::debug!("STORAGE PUT RESULT: success");
         Ok(())
     }
 }
@@ -69,10 +76,12 @@ impl LocalStorage {
 
 impl Storage for LocalStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let full_path = format!("{}/{}", self.base_path, prefix);
         let path = Path::new(&full_path);
         
         if !path.exists() {
+            log::debug!("STORAGE LIST RESULT: 0 items (path does not exist)");
             return Ok(Vec::new());
         }
         
@@ -83,20 +92,26 @@ impl Storage for LocalStorage {
             results.push(format!("{}/{}", prefix, file_name));
         }
         
+        log::debug!("STORAGE LIST RESULT: {} items", results.len());
         Ok(results)
     }
 
     fn get(&self, path: &str) -> Result<String> {
+        log::debug!("STORAGE GET: path='{}'", path);
         let full_path = format!("{}/{}", self.base_path, path);
-        Ok(fs::read_to_string(full_path)?)
+        let content = fs::read_to_string(full_path)?;
+        log::debug!("STORAGE GET RESULT: {} bytes", content.len());
+        Ok(content)
     }
 
     fn put(&self, path: &str, content: &str) -> Result<()> {
+        log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
         let full_path = format!("{}/{}", self.base_path, path);
         if let Some(parent) = Path::new(&full_path).parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(full_path, content)?;
+        log::debug!("STORAGE PUT RESULT: success");
         Ok(())
     }
 }
@@ -121,6 +136,7 @@ impl Default for InMemoryStorage {
 
 impl Storage for InMemoryStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let data = self.data.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
         let mut results = Vec::new();
         
@@ -131,19 +147,25 @@ impl Storage for InMemoryStorage {
         }
         
         results.sort();
+        log::debug!("STORAGE LIST RESULT: {} items", results.len());
         Ok(results)
     }
 
     fn get(&self, path: &str) -> Result<String> {
+        log::debug!("STORAGE GET: path='{}'", path);
         let data = self.data.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
-        data.get(path)
+        let content = data.get(path)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Path not found: {}", path))
+            .ok_or_else(|| anyhow::anyhow!("Path not found: {}", path))?;
+        log::debug!("STORAGE GET RESULT: {} bytes", content.len());
+        Ok(content)
     }
 
     fn put(&self, path: &str, content: &str) -> Result<()> {
+        log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
         let mut data = self.data.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
         data.insert(path.to_string(), content.to_string());
+        log::debug!("STORAGE PUT RESULT: success");
         Ok(())
     }
 }
@@ -198,8 +220,8 @@ pub struct TimestampRange {
 
 
 pub struct SyncClient {
-    config: SyncConfig,
-    storage: Box<dyn Storage>,
+    pub config: SyncConfig,
+    pub storage: Box<dyn Storage>,
 }
 
 impl SyncClient {
@@ -538,7 +560,11 @@ mod tests {
 
     #[test]
     fn test_sync_single_database() -> Result<()> {
-        env_logger::try_init().ok(); // Initialize logging (ignore if already initialized)
+        // Initialize debug logging for tests
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .is_test(true)
+            .try_init();
 
         // Create a database and set up table
         let db = crate::db::Db::open_memory()?;
@@ -583,7 +609,11 @@ mod tests {
 
     #[test]
     fn test_sync_between_two_databases() -> Result<()> {
-        env_logger::try_init().ok();
+        // Initialize debug logging for tests
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .is_test(true)
+            .try_init();
 
         // Create two databases with the same schema
         let db1 = crate::db::Db::open_memory()?;
@@ -662,7 +692,11 @@ mod tests {
 
     #[test]
     fn test_sync_change_ordering() -> Result<()> {
-        env_logger::try_init().ok();
+        // Initialize debug logging for tests
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .is_test(true)
+            .try_init();
 
         let db1 = crate::db::Db::open_memory()?;
         let db2 = crate::db::Db::open_memory()?;
@@ -728,7 +762,11 @@ mod tests {
 
     #[test]
     fn test_sync_skip_own_changes() -> Result<()> {
-        env_logger::try_init().ok();
+        // Initialize debug logging for tests
+        let _ = env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Debug)
+            .is_test(true)
+            .try_init();
 
         let db = crate::db::Db::open_memory()?;
         db.migrate(&[

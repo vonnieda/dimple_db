@@ -206,6 +206,8 @@ impl Db {
     }
     
     pub fn query<T: Entity>(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<Vec<T>> {
+        log::debug!("SQL QUERY: {}", sql);
+        
         let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
         
         let mut stmt = conn.prepare(sql)?;
@@ -217,6 +219,7 @@ impl Db {
             results.push(entity);
         }
         
+        log::debug!("SQL QUERY RESULT: {} rows", results.len());
         Ok(results)
     }
 
@@ -331,6 +334,8 @@ impl Db {
             .collect();
         
         let sql = format!("UPDATE {} SET {} WHERE key = ?", table_name, set_clauses.join(", "));
+        log::debug!("SQL EXECUTE: {}", sql);
+        
         let mut stmt = tx.prepare(&sql)?;
         
         // Build parameter list: all non-key values + key for WHERE clause
@@ -340,7 +345,8 @@ impl Db {
             .collect();
         values.push(&key);
         
-        stmt.execute(&values[..])?;
+        let affected_rows = stmt.execute(&values[..])?;
+        log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
         Ok(())
     }
     
@@ -377,10 +383,12 @@ impl Db {
             column_names.join(", "),
             placeholders
         );
+        log::debug!("SQL EXECUTE: {}", sql);
         
         let mut stmt = tx.prepare(&sql)?;
         let values: Vec<&dyn rusqlite::ToSql> = filtered_params.iter().map(|(_, value)| *value).collect();
-        stmt.execute(&values[..])?;
+        let affected_rows = stmt.execute(&values[..])?;
+        log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
         
         Ok(())
     }
@@ -446,10 +454,12 @@ impl Db {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as i64;
         
-        tx.execute(
+        log::debug!("SQL EXECUTE: INSERT INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)");
+        let tx_affected = tx.execute(
             "INSERT INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)",
             rusqlite::params![transaction_id, timestamp, self.author, Option::<String>::None],
         )?;
+        log::debug!("SQL EXECUTE RESULT: {} rows affected", tx_affected);
         
         // Create change record
         let change_id = Uuid::now_v7().to_string();
@@ -459,7 +469,8 @@ impl Db {
             ChangeType::Delete => "Delete",
         };
         
-        tx.execute(
+        log::debug!("SQL EXECUTE: INSERT INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        let ch_affected = tx.execute(
             "INSERT INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 change_id,
@@ -471,6 +482,7 @@ impl Db {
                 new_values,
             ],
         )?;
+        log::debug!("SQL EXECUTE RESULT: {} rows affected", ch_affected);
         
         Ok(())
     }
@@ -596,16 +608,19 @@ impl Db {
 
         // Insert new transactions
         for (_, transaction) in transactions_to_insert {
-            tx.execute(
+            log::debug!("SQL EXECUTE: INSERT OR IGNORE INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)");
+            let affected_rows = tx.execute(
                 "INSERT OR IGNORE INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)",
                 rusqlite::params![transaction.id, transaction.timestamp, transaction.author, transaction.bundle_id],
             )?;
+            log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
         }
 
         // Insert change records and apply entity changes
         for change in changes_to_apply {
             // Insert the change record (preserve original change ID and transaction ID)
-            tx.execute(
+            log::debug!("SQL EXECUTE: INSERT OR IGNORE INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)");
+            let affected_rows = tx.execute(
                 "INSERT OR IGNORE INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     change.id,
@@ -617,6 +632,7 @@ impl Db {
                     change.new_values,
                 ],
             )?;
+            log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
 
             // Apply the entity change
             match change.change_type.as_str() {
