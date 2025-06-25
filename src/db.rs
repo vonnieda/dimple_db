@@ -1,8 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::sync::mpsc::Receiver;
 
 use rusqlite::Connection;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::notifier::Notifier;
 
 pub trait Entity: Serialize + DeserializeOwned {}
 
@@ -35,10 +39,35 @@ pub struct Change {
     pub new_values: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResult<T> {
+    pub data: Vec<T>,
+    pub keys: HashSet<String>,
+    pub hash: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuerySubscription {
+    pub id: String,
+    pub sql: String,
+    pub params: Vec<String>, // Serialized parameters
+    pub dependent_tables: HashSet<String>,
+    pub last_result_keys: HashSet<String>,
+    pub last_result_hash: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryChange<T> {
+    pub subscription_id: String,
+    pub new_result: QueryResult<T>,
+}
+
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<RwLock<Connection>>,
     author: String,
+    subscriptions: Arc<RwLock<HashMap<String, QuerySubscription>>>,
+    query_notifier: Arc<Notifier<serde_json::Value>>, // Generic JSON notifications
 }
 
 impl Db {
@@ -47,6 +76,8 @@ impl Db {
         let db = Db { 
             conn,
             author: "".to_string(), // Will be set after initialization
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            query_notifier: Arc::new(Notifier::new()),
         };
         db.init_connection()?;
         db.init_change_tracking_tables()?;
@@ -174,6 +205,12 @@ impl Db {
         self.record_change(&tx, &table_name, &key_value, change_type, old_values, Some(new_values))?;
         
         tx.commit()?;
+        
+        // Release the write lock before triggering notifications
+        drop(conn);
+        
+        // Trigger reactive query notifications after successful commit and lock release
+        self.notify_query_subscribers(&table_name, &key_value)?;
         
         Ok(final_entity)
     }
@@ -447,6 +484,289 @@ impl Db {
              ORDER BY timestamp ASC",
             &[&timestamp],
         )
+    }
+
+    fn extract_table_dependencies(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<HashSet<String>> {
+        let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        
+        let explain_sql = format!("EXPLAIN QUERY PLAN {}", sql);
+        let mut stmt = conn.prepare(&explain_sql)?;
+        let mut rows = stmt.query(params)?;
+        
+        let mut tables = HashSet::new();
+        
+        while let Some(row) = rows.next()? {
+            // EXPLAIN QUERY PLAN columns: id, parent, notused, detail
+            let detail: String = row.get(3)?;
+            
+            // Parse table names from the detail column
+            // Examples: "SCAN TABLE Artist", "SEARCH TABLE Artist USING INDEX"
+            if let Some(table_name) = self.extract_table_from_detail(&detail) {
+                tables.insert(table_name);
+            }
+        }
+        Ok(tables)
+    }
+
+    fn extract_table_from_detail(&self, detail: &str) -> Option<String> {
+        // Handle common patterns in EXPLAIN QUERY PLAN output
+        let detail_upper = detail.to_uppercase();
+        
+        if detail_upper.starts_with("SCAN TABLE ") {
+            // "SCAN TABLE Artist" -> "Artist"
+            if let Some(table_name) = detail_upper.strip_prefix("SCAN TABLE ") {
+                return Some(table_name.split_whitespace().next()?.to_string());
+            }
+        } else if detail_upper.starts_with("SCAN ") {
+            // "SCAN Artist" -> "Artist" (simpler SQLite format)
+            if let Some(table_name) = detail_upper.strip_prefix("SCAN ") {
+                return Some(table_name.split_whitespace().next()?.to_string());
+            }
+        } else if detail_upper.starts_with("SEARCH TABLE ") {
+            // "SEARCH TABLE Artist USING INDEX idx_name" -> "Artist"
+            if let Some(rest) = detail_upper.strip_prefix("SEARCH TABLE ") {
+                return Some(rest.split_whitespace().next()?.to_string());
+            }
+        } else if detail_upper.starts_with("SEARCH ") {
+            // "SEARCH Artist USING INDEX idx_name" -> "Artist" (simpler format)
+            if let Some(rest) = detail_upper.strip_prefix("SEARCH ") {
+                return Some(rest.split_whitespace().next()?.to_string());
+            }
+        } else if detail_upper.contains(" TABLE ") {
+            // Generic fallback for other patterns
+            if let Some(start) = detail_upper.find(" TABLE ") {
+                let after_table = &detail_upper[start + 7..]; // 7 = len(" TABLE ")
+                return Some(after_table.split_whitespace().next()?.to_string());
+            }
+        }
+        
+        None
+    }
+
+    fn calculate_result_hash<T: Entity>(&self, data: &[T]) -> anyhow::Result<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash the serialized data for comparison
+        for item in data {
+            let json_str = serde_json::to_string(item)?;
+            json_str.hash(&mut hasher);
+        }
+        
+        Ok(hasher.finish())
+    }
+
+    fn extract_keys_from_results<T: Entity>(&self, data: &[T]) -> anyhow::Result<HashSet<String>> {
+        let mut keys = HashSet::new();
+        
+        for item in data {
+            let key = self.extract_key_value(item)?;
+            keys.insert(key);
+        }
+        
+        Ok(keys)
+    }
+
+    pub fn subscribe_to_query<T: Entity + Send + 'static>(&self, sql: &str, params: &[&dyn rusqlite::ToSql]) -> anyhow::Result<Receiver<QueryResult<T>>> {
+        // Generate unique subscription ID
+        let subscription_id = Uuid::now_v7().to_string();
+        
+        // Extract table dependencies using EXPLAIN QUERY PLAN
+        let dependent_tables = self.extract_table_dependencies(sql, params)?;
+        
+        // Execute the query to get initial results
+        let initial_results: Vec<T> = self.query(sql, params)?;
+        let initial_keys = self.extract_keys_from_results(&initial_results)?;
+        let initial_hash = self.calculate_result_hash(&initial_results)?;
+        
+        // Serialize parameters for storage (simplified for now)
+        let serialized_params: Vec<String> = params.iter()
+            .enumerate()
+            .map(|(i, _)| format!("param_{}", i)) // Placeholder - proper param serialization would be more complex
+            .collect();
+        
+        // Create subscription
+        let subscription = QuerySubscription {
+            id: subscription_id.clone(),
+            sql: sql.to_string(),
+            params: serialized_params,
+            dependent_tables,
+            last_result_keys: initial_keys.clone(),
+            last_result_hash: initial_hash,
+        };
+        
+        // Store subscription
+        {
+            let mut subscriptions = self.subscriptions.write()
+                .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions"))?;
+            subscriptions.insert(subscription_id.clone(), subscription);
+        }
+        
+        // Create receiver for this subscription
+        let rx = self.query_notifier.observer();
+        
+        // Send initial result
+        let initial_query_result = QueryResult {
+            data: initial_results,
+            keys: initial_keys,
+            hash: initial_hash,
+        };
+        
+        // Convert to JSON for the generic notifier
+        let initial_notification = serde_json::json!({
+            "subscription_id": subscription_id,
+            "type": "initial",
+            "result": serde_json::to_value(&initial_query_result)?
+        });
+        
+        self.query_notifier.notify(initial_notification);
+        
+        // Filter and convert the generic receiver to our specific type
+        let (filtered_tx, filtered_rx) = std::sync::mpsc::channel::<QueryResult<T>>();
+        let target_subscription_id = subscription_id.clone();
+        
+        std::thread::spawn(move || {
+            for notification in rx {
+                if let Some(obj) = notification.as_object() {
+                    if let Some(sub_id) = obj.get("subscription_id").and_then(|v| v.as_str()) {
+                        if sub_id == target_subscription_id {
+                            if let Some(result_value) = obj.get("result") {
+                                if let Ok(query_result) = serde_json::from_value::<QueryResult<T>>(result_value.clone()) {
+                                    let _ = filtered_tx.send(query_result);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        
+        Ok(filtered_rx)
+    }
+
+    fn notify_query_subscribers(&self, changed_table: &str, changed_key: &str) -> anyhow::Result<()> {
+        // Get a snapshot of affected subscriptions
+        let affected_subscriptions = {
+            if let Ok(subs) = self.subscriptions.read() {
+                subs.iter()
+                    .filter(|(_, subscription)| {
+                        subscription.dependent_tables.contains(changed_table) ||
+                        subscription.dependent_tables.contains(&changed_table.to_uppercase()) ||
+                        subscription.last_result_keys.contains(changed_key)
+                    })
+                    .map(|(id, sub)| (id.clone(), sub.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        }; // Lock released here
+
+        // Process affected subscriptions without holding the subscription lock
+        for (subscription_id, subscription) in affected_subscriptions {
+            // Re-execute the query to check for changes
+            self.check_and_notify_subscription(&subscription_id, &subscription)?;
+        }
+
+        Ok(())
+    }
+
+    fn check_and_notify_subscription(&self, subscription_id: &str, subscription: &QuerySubscription) -> anyhow::Result<()> {
+        // Re-execute the query to get current results
+        let results: Vec<serde_json::Value> = self.query_as_json(&subscription.sql)?;
+        
+        // Calculate new hash and keys
+        let new_hash = self.calculate_json_hash(&results)?;
+        let new_keys = self.extract_keys_from_json_results(&results)?;
+
+        // Check if results have changed (compare with subscription state)
+        if new_hash != subscription.last_result_hash || new_keys != subscription.last_result_keys {
+            // Update subscription with new state - acquire lock briefly
+            if let Ok(mut subscriptions) = self.subscriptions.write() {
+                if let Some(sub) = subscriptions.get_mut(subscription_id) {
+                    sub.last_result_hash = new_hash;
+                    sub.last_result_keys = new_keys.clone();
+                }
+            } // Lock released here
+
+            // Create result object (generic JSON for now)
+            let query_result = serde_json::json!({
+                "data": results,
+                "keys": new_keys.into_iter().collect::<Vec<_>>(),
+                "hash": new_hash
+            });
+
+            // Send notification
+            let notification = serde_json::json!({
+                "subscription_id": subscription_id,
+                "type": "update", 
+                "result": query_result
+            });
+
+            self.query_notifier.notify(notification);
+        }
+
+        Ok(())
+    }
+
+    fn query_as_json(&self, sql: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = stmt.query([])?;
+        
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            let column_count = row.as_ref().column_count();
+            let mut json_map = serde_json::Map::new();
+            
+            for i in 0..column_count {
+                let column_name = row.as_ref().column_name(i)?;
+                let value: rusqlite::types::Value = row.get(i)?;
+                
+                let json_value = match value {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(i) => serde_json::Value::Number(i.into()),
+                    rusqlite::types::Value::Real(f) => serde_json::Value::Number(
+                        serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0))
+                    ),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+                    rusqlite::types::Value::Blob(_) => serde_json::Value::String("<binary>".to_string()),
+                };
+                
+                json_map.insert(column_name.to_string(), json_value);
+            }
+            
+            results.push(serde_json::Value::Object(json_map));
+        }
+        
+        Ok(results)
+    }
+
+    fn calculate_json_hash(&self, data: &[serde_json::Value]) -> anyhow::Result<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        let json_str = serde_json::to_string(data)?;
+        json_str.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+
+    fn extract_keys_from_json_results(&self, data: &[serde_json::Value]) -> anyhow::Result<HashSet<String>> {
+        let mut keys = HashSet::new();
+        
+        for item in data {
+            if let Some(obj) = item.as_object() {
+                if let Some(key_value) = obj.get("key") {
+                    if let Some(key_str) = key_value.as_str() {
+                        keys.insert(key_str.to_string());
+                    }
+                }
+            }
+        }
+        
+        Ok(keys)
     }
 }
 
@@ -891,6 +1211,101 @@ mod tests {
         // Get changes by different author (should be empty)
         let other_changes = db.get_changes_by_author("other-author")?;
         assert_eq!(other_changes.len(), 0);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_reactive_query_basic() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Subscribe to a query
+        let rx = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name LIKE 'Metal%'", &[])?;
+        
+        // Collect initial result
+        let initial_result = rx.recv_timeout(std::time::Duration::from_millis(100))?;
+        assert_eq!(initial_result.data.len(), 0); // No matching artists initially
+        
+        // Save an artist that should trigger the query
+        let _artist = db.save(&Artist {
+            name: "Metallica".to_string(),
+            disambiguation: Some("American metal band".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Should receive a notification
+        let updated_result = rx.recv_timeout(std::time::Duration::from_millis(1000))?;
+        assert_eq!(updated_result.data.len(), 1);
+        assert_eq!(updated_result.data[0].name, "Metallica");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_reactive_query_no_match() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Subscribe to a specific query
+        let rx = db.subscribe_to_query::<Artist>("SELECT * FROM Artist WHERE name = 'Metallica'", &[])?;
+        
+        // Collect initial result
+        let initial_result = rx.recv_timeout(std::time::Duration::from_millis(100))?;
+        assert_eq!(initial_result.data.len(), 0);
+        
+        // Save an artist that should trigger re-evaluation but result in same empty set
+        let _artist = db.save(&Artist {
+            name: "Iron Maiden".to_string(),
+            disambiguation: Some("British metal band".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Should receive a notification (table changed) but result set should still be empty
+        let updated_result = rx.recv_timeout(std::time::Duration::from_millis(1000))?;
+        assert_eq!(updated_result.data.len(), 0); // Still no matching artists
+        
+        Ok(())
+    }
+
+    #[test] 
+    fn test_explain_query_plan_parsing() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Create test table
+        if let Ok(conn) = db.conn.write() {
+            conn.execute_batch("
+                CREATE TABLE Artist (
+                    key            TEXT NOT NULL PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    disambiguation TEXT
+                );
+            ")?;
+        }
+        
+        // Test table dependency extraction
+        let tables = db.extract_table_dependencies("SELECT * FROM Artist", &[])?;
+        assert!(tables.contains("ARTIST")); // SQLite normalizes to uppercase
         
         Ok(())
     }
