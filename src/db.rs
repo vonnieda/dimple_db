@@ -508,6 +508,109 @@ impl Db {
         )
     }
 
+    pub fn get_all_changes(&self) -> anyhow::Result<Vec<Change>> {
+        self.query(
+            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
+             FROM _change c 
+             JOIN _transaction t ON c.transaction_id = t.id 
+             ORDER BY t.timestamp ASC",
+            &[],
+        )
+    }
+
+    pub fn apply_changes(&self, changes: &[Change]) -> anyhow::Result<()> {
+        let mut conn = self.conn.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        let tx = conn.transaction()?;
+
+        for change in changes {
+            // Skip changes from the same author to avoid conflicts
+            if let Ok(transaction) = self.get_transaction_by_id(&tx, &change.transaction_id) {
+                if transaction.author == self.author {
+                    continue; // Skip our own changes
+                }
+            }
+
+            // Apply the change based on its type
+            match change.change_type.as_str() {
+                "Insert" => self.apply_insert_change(&tx, change)?,
+                "Update" => self.apply_update_change(&tx, change)?,
+                "Delete" => self.apply_delete_change(&tx, change)?,
+                _ => return Err(anyhow::anyhow!("Unknown change type: {}", change.change_type)),
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn get_transaction_by_id(&self, conn: &rusqlite::Connection, transaction_id: &str) -> anyhow::Result<Transaction> {
+        let mut stmt = conn.prepare("SELECT id, timestamp, author, bundle_id FROM _transaction WHERE id = ?")?;
+        let mut rows = stmt.query([transaction_id])?;
+        
+        if let Some(row) = rows.next()? {
+            Ok(Transaction {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                author: row.get(2)?,
+                bundle_id: row.get(3)?,
+            })
+        } else {
+            Err(anyhow::anyhow!("Transaction not found: {}", transaction_id))
+        }
+    }
+
+    fn apply_insert_change(&self, tx: &rusqlite::Transaction, change: &Change) -> anyhow::Result<()> {
+        if let Some(new_values) = &change.new_values {
+            let entity_json: serde_json::Value = serde_json::from_str(new_values)?;
+            
+            // Check if the record already exists
+            if self.record_exists(tx, &change.entity_type, &change.entity_key)? {
+                // Record exists, this might be a conflict. For now, skip it.
+                log::warn!("Insert conflict: {} {} already exists, skipping", change.entity_type, change.entity_key);
+                return Ok(());
+            }
+
+            // Insert the record
+            let table_columns = self.get_table_columns(tx, &change.entity_type)?;
+            let all_params = serde_rusqlite::to_params_named(&entity_json)?;
+            self.insert_record(tx, &change.entity_type, all_params, &table_columns)?;
+        }
+        Ok(())
+    }
+
+    fn apply_update_change(&self, tx: &rusqlite::Transaction, change: &Change) -> anyhow::Result<()> {
+        if let Some(new_values) = &change.new_values {
+            let entity_json: serde_json::Value = serde_json::from_str(new_values)?;
+            
+            // Check if the record exists
+            if !self.record_exists(tx, &change.entity_type, &change.entity_key)? {
+                // Record doesn't exist, treat as insert
+                log::warn!("Update target missing: {} {}, treating as insert", change.entity_type, change.entity_key);
+                return self.apply_insert_change(tx, change);
+            }
+
+            // Update the record
+            let table_columns = self.get_table_columns(tx, &change.entity_type)?;
+            let all_params = serde_rusqlite::to_params_named(&entity_json)?;
+            self.update_record(tx, &change.entity_type, &change.entity_key, all_params, &table_columns)?;
+        }
+        Ok(())
+    }
+
+    fn apply_delete_change(&self, tx: &rusqlite::Transaction, change: &Change) -> anyhow::Result<()> {
+        // Check if the record exists
+        if !self.record_exists(tx, &change.entity_type, &change.entity_key)? {
+            // Record doesn't exist, nothing to delete
+            log::warn!("Delete target missing: {} {}, skipping", change.entity_type, change.entity_key);
+            return Ok(());
+        }
+
+        // Delete the record
+        let sql = format!("DELETE FROM {} WHERE key = ?", change.entity_type);
+        tx.execute(&sql, [&change.entity_key])?;
+        Ok(())
+    }
+
     pub fn get_transactions_since(&self, timestamp: i64) -> anyhow::Result<Vec<Transaction>> {
         self.query(
             "SELECT id, timestamp, author, bundle_id 
@@ -943,6 +1046,37 @@ impl Db {
         migrations.to_latest(&mut *conn)?;
         
         Ok(())
+    }
+
+    pub fn get_metadata(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.read()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        
+        match conn.query_row(
+            "SELECT value FROM _metadata WHERE key = ?",
+            [key],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_metadata(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let conn = self.conn.write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO _metadata (key, value) VALUES (?, ?)",
+            [key, value],
+        )?;
+        
+        Ok(())
+    }
+
+    pub fn get_author(&self) -> &str {
+        &self.author
     }
 }
 
