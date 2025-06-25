@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock, Weak};
 use std::sync::mpsc::Receiver;
 
 use rusqlite::Connection;
+use rusqlite_migration::{Migrations, M};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -928,6 +929,21 @@ impl Db {
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions"))?;
         Ok(subscriptions.remove(subscription_id).is_some())
     }
+
+    pub fn migrate(&self, migration_sqls: &[&str]) -> anyhow::Result<()> {
+        let mut conn = self.conn.write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
+        
+        // Convert string slices to M::up() migrations
+        let migrations: Vec<M> = migration_sqls.iter()
+            .map(|sql| M::up(sql))
+            .collect();
+        
+        let migrations = Migrations::new(migrations);
+        migrations.to_latest(&mut *conn)?;
+        
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -949,15 +965,20 @@ mod tests {
     fn quick_start() -> anyhow::Result<()> {
         env_logger::init();
         let db = Db::open_memory()?;
-        if let Ok(conn) = db.conn.write() {
-            conn.execute_batch("
-                CREATE TABLE Artist (
-                    key            TEXT NOT NULL PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    disambiguation TEXT
-                );
-            ")?;
-        }
+        
+        // Demonstrate schema migration: start with basic table, then add disambiguation column
+        let migrations = &[
+            // Migration 1: Create basic Artist table
+            "CREATE TABLE Artist (
+                key  TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL
+            );",
+            
+            // Migration 2: Add disambiguation column
+            "ALTER TABLE Artist ADD COLUMN disambiguation TEXT;"
+        ];
+        
+        db.migrate(migrations)?;
         
         // Track results from reactive query
         let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::<QueryResult<Artist>>::new()));
@@ -976,9 +997,11 @@ mod tests {
         // Save artist - triggers reactive notification
         let artist = db.save(&Artist {
             name: "Metallica".to_string(),
+            disambiguation: Some("American heavy metal band".to_string()),
             ..Default::default()
         })?;
         assert!(!artist.key.is_empty());
+        assert_eq!(artist.disambiguation, Some("American heavy metal band".to_string()));
         
         // Allow time for reactive update
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -989,6 +1012,7 @@ mod tests {
         assert_eq!(r[0].data.len(), 0); // Initial empty result
         assert_eq!(r[1].data.len(), 1); // Updated result with Metallica
         assert_eq!(r[1].data[0].name, "Metallica");
+        assert_eq!(r[1].data[0].disambiguation, Some("American heavy metal band".to_string()));
         
         Ok(())
     }
@@ -1727,6 +1751,111 @@ mod tests {
         
         assert_eq!(optimized_count, iterations as i64);
         assert_eq!(raw_count, iterations as i64);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_schema_migration() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        // Define migrations
+        let migrations = &[
+            // Migration 1: Create users table
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT
+            );",
+            
+            // Migration 2: Add age column
+            "ALTER TABLE users ADD COLUMN age INTEGER;",
+            
+            // Migration 3: Create posts table
+            "CREATE TABLE posts (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );"
+        ];
+        
+        // Run migrations
+        db.migrate(migrations)?;
+        
+        // Verify tables were created
+        let conn = db.conn.read().unwrap();
+        
+        // Check users table structure
+        let mut stmt = conn.prepare("PRAGMA table_info(users)")?;
+        let column_info: Vec<(i32, String, String)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        
+        // Should have id, name, email, age columns
+        assert_eq!(column_info.len(), 4);
+        assert_eq!(column_info[0].1, "id");
+        assert_eq!(column_info[1].1, "name");
+        assert_eq!(column_info[2].1, "email");
+        assert_eq!(column_info[3].1, "age");
+        
+        // Check posts table exists
+        let mut stmt = conn.prepare("PRAGMA table_info(posts)")?;
+        let posts_columns: Vec<String> = stmt.query_map([], |row| {
+            Ok(row.get::<_, String>(1)?)
+        })?.collect::<Result<Vec<_>, _>>()?;
+        
+        assert!(posts_columns.contains(&"id".to_string()));
+        assert!(posts_columns.contains(&"user_id".to_string()));
+        assert!(posts_columns.contains(&"title".to_string()));
+        assert!(posts_columns.contains(&"content".to_string()));
+        
+        // Test that we can insert data
+        conn.execute(
+            "INSERT INTO users (name, email, age) VALUES (?, ?, ?)",
+            ["John Doe", "john@example.com", "30"]
+        )?;
+        
+        conn.execute(
+            "INSERT INTO posts (user_id, title, content) VALUES (?, ?, ?)",
+            ["1", "Hello World", "This is my first post"]
+        )?;
+        
+        // Verify data was inserted
+        let user_count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
+        let post_count: i64 = conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
+        
+        assert_eq!(user_count, 1);
+        assert_eq!(post_count, 1);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_migration_idempotency() -> anyhow::Result<()> {
+        let db = crate::Db::open_memory()?;
+        
+        let migrations = &[
+            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT);",
+            "ALTER TABLE test_table ADD COLUMN email TEXT;"
+        ];
+        
+        // Run migrations twice - should not fail
+        db.migrate(migrations)?;
+        db.migrate(migrations)?;
+        
+        // Verify table structure is correct
+        let conn = db.conn.read().unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(test_table)")?;
+        let columns: Vec<String> = stmt.query_map([], |row| {
+            Ok(row.get::<_, String>(1)?)
+        })?.collect::<Result<Vec<_>, _>>()?;
+        
+        assert_eq!(columns.len(), 3);
+        assert!(columns.contains(&"id".to_string()));
+        assert!(columns.contains(&"name".to_string()));
+        assert!(columns.contains(&"email".to_string()));
         
         Ok(())
     }
