@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;
@@ -277,13 +277,13 @@ impl SyncClient {
                 continue;
             };
 
-            // Get the latest timestamp we have locally for this author
-            let latest_local_timestamp = db.get_latest_timestamp_for_author(author_name)?;
+            // Get the latest UUID we have locally for this author
+            let latest_local_uuid = db.get_latest_uuid_for_author(author_name)?;
             
-            log::info!("Latest local timestamp for author {}: {}", author_name, latest_local_timestamp);
+            log::info!("Latest local UUID for author {}: {}", author_name, latest_local_uuid);
 
-            // Get only changes since our latest local timestamp
-            let author_changes = self.get_author_changes_since(&author_dir, latest_local_timestamp)?;
+            // Get only changes since our latest local UUID
+            let author_changes = self.get_author_changes_since_uuid(&author_dir, &latest_local_uuid)?;
             
             if !author_changes.is_empty() {
                 log::info!("Found {} new change bundles from author {}", author_changes.len(), author_name);
@@ -295,40 +295,30 @@ impl SyncClient {
         Ok(all_changes)
     }
 
-    fn get_author_changes(&self, author_path: &str) -> Result<Vec<ChangeBundle>> {
+
+    fn get_author_changes_since_uuid(&self, author_path: &str, since_uuid: &str) -> Result<Vec<ChangeBundle>> {
         // List change files for this author
-        let change_files = self.storage.list(author_path)?;
+        let mut change_files = self.storage.list(author_path)?;
+        
+        // Sort files by name (which contain UUIDs, so they'll be in chronological order)
+        change_files.sort();
+        
         let mut bundles = Vec::new();
+        
+        // If since_uuid is the null UUID, return all files
+        let is_null_uuid = since_uuid == "00000000-0000-0000-0000-000000000000";
 
         for file_path in change_files {
             if !file_path.ends_with(".json") {
                 continue;
             }
 
-            // Download and parse the change bundle
-            let content = self.storage.get(&file_path)?;
-            let bundle: ChangeBundle = serde_json::from_str(&content)?;
-            bundles.push(bundle);
-        }
-
-        Ok(bundles)
-    }
-
-    fn get_author_changes_since(&self, author_path: &str, since_timestamp: i64) -> Result<Vec<ChangeBundle>> {
-        // List change files for this author
-        let change_files = self.storage.list(author_path)?;
-        let mut bundles = Vec::new();
-
-        for file_path in change_files {
-            if !file_path.ends_with(".json") {
-                continue;
-            }
-
-            // Check if this file is newer than our latest timestamp
+            // Extract UUID from filename
             if let Some(filename) = file_path.split('/').last() {
-                if let Ok(file_timestamp) = self.parse_timestamp_from_filename(filename) {
-                    if file_timestamp <= since_timestamp {
-                        continue; // Skip this file, we already have these changes
+                if let Some(uuid_part) = filename.strip_prefix("changes-").and_then(|s| s.strip_suffix(".json")) {
+                    // If null UUID, include all files; otherwise only include files with UUID > since_uuid
+                    if !is_null_uuid && uuid_part <= since_uuid {
+                        continue; // Skip files up to and including since_uuid
                     }
                 }
             }
@@ -386,14 +376,14 @@ impl SyncClient {
             timestamp_range,
         };
 
-        // Generate filename based on current date
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?;
-        let filename = format!("changes-{}.json", 
-            chrono::DateTime::from_timestamp(now.as_secs() as i64, 0)
-                .unwrap_or_default()
-                .format("%Y-%m-%d-%H%M%S")
-        );
+        // Generate filename based on latest change UUID
+        let latest_change_id = if let Some(last_change) = changes.last() {
+            &last_change.id
+        } else {
+            return Ok(()); // No changes to push
+        };
+        
+        let filename = format!("changes-{}.json", latest_change_id);
 
         let path = if self.config.base_path.is_empty() {
             format!("authors/{}/{}", author, filename)
@@ -428,54 +418,43 @@ impl SyncClient {
         Err(anyhow::anyhow!("Failed to extract timestamp from change ID: {}", change.id))
     }
 
-    fn parse_timestamp_from_filename(&self, filename: &str) -> Result<i64> {
-        // Parse timestamp from filename format: changes-YYYY-MM-DD-HHMMSS.json
-        if !filename.starts_with("changes-") || !filename.ends_with(".json") {
-            return Err(anyhow::anyhow!("Invalid filename format: {}", filename));
-        }
-        
-        let timestamp_str = filename
-            .strip_prefix("changes-")
-            .and_then(|s| s.strip_suffix(".json"))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract timestamp from filename: {}", filename))?;
-        
-        // Parse YYYY-MM-DD-HHMMSS format
-        let parsed_time = chrono::NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d-%H%M%S")?;
-        Ok(parsed_time.and_utc().timestamp_millis())
-    }
 
-    fn get_latest_pushed_timestamp(&self, author: &str) -> Result<i64> {
-        // List files for this author to find the latest pushed timestamp
+    fn get_latest_pushed_uuid(&self, author: &str) -> Result<String> {
+        // List files for this author to find the latest pushed UUID
         let author_prefix = if self.config.base_path.is_empty() {
             format!("authors/{}/", author)
         } else {
             format!("{}/authors/{}/", self.config.base_path, author)
         };
         
-        let files = self.storage.list(&author_prefix)?;
-        let mut latest_timestamp = 0i64;
+        let mut files = self.storage.list(&author_prefix)?;
         
-        for file_path in files {
-            if let Some(filename) = file_path.split('/').last() {
-                if let Ok(timestamp) = self.parse_timestamp_from_filename(filename) {
-                    latest_timestamp = latest_timestamp.max(timestamp);
+        // Sort filenames - since they contain UUIDs, the latest will be last
+        files.sort();
+        
+        // Extract UUID from the latest filename
+        if let Some(latest_file) = files.last() {
+            if let Some(filename) = latest_file.split('/').last() {
+                if let Some(uuid_part) = filename.strip_prefix("changes-").and_then(|s| s.strip_suffix(".json")) {
+                    return Ok(uuid_part.to_string());
                 }
             }
         }
         
-        Ok(latest_timestamp)
+        // Return null UUID if no files found
+        Ok("00000000-0000-0000-0000-000000000000".to_string())
     }
 
     fn push_new_changes(&self, db: &Db) -> Result<()> {
         let author = db.get_author();
         
-        // Get the timestamp of the latest pushed file for this author
-        let latest_pushed_timestamp = self.get_latest_pushed_timestamp(author)?;
+        // Get the UUID of the latest pushed change for this author
+        let latest_pushed_uuid = self.get_latest_pushed_uuid(author)?;
         
-        log::info!("Latest pushed timestamp for author {}: {}", author, latest_pushed_timestamp);
+        log::info!("Latest pushed UUID for author {}: {}", author, latest_pushed_uuid);
         
-        // Get changes since the latest pushed timestamp
-        let new_changes = db.get_changes_since(latest_pushed_timestamp)?;
+        // Get changes since the latest pushed UUID
+        let new_changes = db.get_changes_since_uuid(&latest_pushed_uuid)?;
         
         if new_changes.is_empty() {
             log::info!("No new changes to push for author {}", author);

@@ -486,6 +486,17 @@ impl Db {
         )
     }
 
+    pub fn get_changes_since_uuid(&self, since_uuid: &str) -> anyhow::Result<Vec<Change>> {
+        self.query(
+            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
+             FROM _change c 
+             JOIN _transaction t ON c.transaction_id = t.id 
+             WHERE t.id > ? 
+             ORDER BY t.id ASC",
+            &[&since_uuid],
+        )
+    }
+
     pub fn get_changes_for_entity(&self, entity_type: &str, entity_key: &str) -> anyhow::Result<Vec<Change>> {
         self.query(
             "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
@@ -698,16 +709,18 @@ impl Db {
         )
     }
 
-    pub fn get_latest_timestamp_for_author(&self, author: &str) -> anyhow::Result<i64> {
+    pub fn get_latest_uuid_for_author(&self, author: &str) -> anyhow::Result<String> {
         let conn = self.conn.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
-        let mut stmt = conn.prepare("SELECT MAX(timestamp) FROM _transaction WHERE author = ?")?;
+        // Get the latest transaction ID (UUIDv7) for this author
+        // UUIDv7 are sortable, so MAX() will give us the most recent
+        let mut stmt = conn.prepare("SELECT MAX(id) FROM _transaction WHERE author = ?")?;
         let mut rows = stmt.query([author])?;
         
         if let Some(row) = rows.next()? {
-            let timestamp: Option<i64> = row.get(0)?;
-            Ok(timestamp.unwrap_or(0))
+            let uuid: Option<String> = row.get(0)?;
+            Ok(uuid.unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string()))
         } else {
-            Ok(0)
+            Ok("00000000-0000-0000-0000-000000000000".to_string())
         }
     }
 
