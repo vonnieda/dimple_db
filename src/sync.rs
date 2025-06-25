@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use anyhow::Result;
-use s3::{Bucket, creds::Credentials, Region};
+use s3::{Bucket, Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Change, Db};
@@ -21,7 +21,13 @@ pub struct S3Storage {
 }
 
 impl S3Storage {
-    pub fn new(_endpoint: &str, bucket_name: &str, region: &str, access_key: &str, secret_key: &str) -> Result<Self> {
+    pub fn new(
+        _endpoint: &str,
+        bucket_name: &str,
+        region: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<Self> {
         let credentials = Credentials::new(Some(access_key), Some(secret_key), None, None, None)?;
         let region = region.parse::<Region>()?;
         let bucket = Bucket::new(bucket_name, region, credentials)?;
@@ -32,15 +38,17 @@ impl S3Storage {
 impl Storage for S3Storage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
-        let results = self.bucket.list(prefix.to_string(), Some("/".to_string()))?;
+        let results = self
+            .bucket
+            .list(prefix.to_string(), Some("/".to_string()))?;
         let mut keys = Vec::new();
-        
+
         for list_bucket_result in results {
             for object in list_bucket_result.contents {
                 keys.push(object.key);
             }
         }
-        
+
         log::debug!("STORAGE LIST RESULT: {} items", keys.len());
         Ok(keys)
     }
@@ -79,19 +87,19 @@ impl Storage for LocalStorage {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let full_path = format!("{}/{}", self.base_path, prefix);
         let path = Path::new(&full_path);
-        
+
         if !path.exists() {
             log::debug!("STORAGE LIST RESULT: 0 items (path does not exist)");
             return Ok(Vec::new());
         }
-        
+
         let mut results = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let file_name = entry.file_name().to_string_lossy().to_string();
             results.push(format!("{}/{}", prefix, file_name));
         }
-        
+
         log::debug!("STORAGE LIST RESULT: {} items", results.len());
         Ok(results)
     }
@@ -137,15 +145,18 @@ impl Default for InMemoryStorage {
 impl Storage for InMemoryStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
-        let data = self.data.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        let data = self
+            .data
+            .read()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
         let mut results = Vec::new();
-        
+
         for key in data.keys() {
             if key.starts_with(prefix) {
                 results.push(key.clone());
             }
         }
-        
+
         results.sort();
         log::debug!("STORAGE LIST RESULT: {} items", results.len());
         Ok(results)
@@ -153,8 +164,12 @@ impl Storage for InMemoryStorage {
 
     fn get(&self, path: &str) -> Result<String> {
         log::debug!("STORAGE GET: path='{}'", path);
-        let data = self.data.read().map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
-        let content = data.get(path)
+        let data = self
+            .data
+            .read()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+        let content = data
+            .get(path)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Path not found: {}", path))?;
         log::debug!("STORAGE GET RESULT: {} bytes", content.len());
@@ -163,7 +178,10 @@ impl Storage for InMemoryStorage {
 
     fn put(&self, path: &str, content: &str) -> Result<()> {
         log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
-        let mut data = self.data.write().map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
         data.insert(path.to_string(), content.to_string());
         log::debug!("STORAGE PUT RESULT: success");
         Ok(())
@@ -200,7 +218,7 @@ impl Default for SyncConfig {
             secret_key: "".to_string(),
             region: "us-east-1".to_string(),
             change_batch_window: Duration::from_secs(24 * 60 * 60), // 24 hours
-            sync_interval: Duration::from_secs(60), // 1 minute
+            sync_interval: Duration::from_secs(60),                 // 1 minute
         }
     }
 }
@@ -217,7 +235,6 @@ pub struct TimestampRange {
     pub start: i64,
     pub end: i64,
 }
-
 
 pub struct SyncClient {
     pub config: SyncConfig,
@@ -272,10 +289,9 @@ impl SyncClient {
         Ok(())
     }
 
-
     fn pull_remote_changes(&self, our_author: &str, db: &Db) -> Result<Vec<ChangeBundle>> {
         log::info!("Pulling incremental remote changes");
-        
+
         // List all authors (directories) in the bucket
         let authors_prefix = if self.config.base_path.is_empty() {
             "authors/".to_string()
@@ -293,40 +309,56 @@ impl SyncClient {
             }
 
             // Extract author name from path
-            let author_name = if let Some(author) = author_dir.trim_end_matches('/').split('/').last() {
-                author
-            } else {
-                continue;
-            };
+            let author_name =
+                if let Some(author) = author_dir.trim_end_matches('/').split('/').last() {
+                    author
+                } else {
+                    continue;
+                };
 
             // Get the latest UUID we have locally for this author
             let latest_local_uuid = db.get_latest_uuid_for_author(author_name)?;
-            
-            log::info!("Latest local UUID for author {}: {}", author_name, latest_local_uuid);
+
+            log::info!(
+                "Latest local UUID for author {}: {}",
+                author_name,
+                latest_local_uuid
+            );
 
             // Get only changes since our latest local UUID
-            let author_changes = self.get_author_changes_since_uuid(&author_dir, &latest_local_uuid)?;
-            
+            let author_changes =
+                self.get_author_changes_since_uuid(&author_dir, &latest_local_uuid)?;
+
             if !author_changes.is_empty() {
-                log::info!("Found {} new change bundles from author {}", author_changes.len(), author_name);
+                log::info!(
+                    "Found {} new change bundles from author {}",
+                    author_changes.len(),
+                    author_name
+                );
                 all_changes.extend(author_changes);
             }
         }
 
-        log::info!("Pulled {} new change bundles from remote authors", all_changes.len());
+        log::info!(
+            "Pulled {} new change bundles from remote authors",
+            all_changes.len()
+        );
         Ok(all_changes)
     }
 
-
-    fn get_author_changes_since_uuid(&self, author_path: &str, since_uuid: &str) -> Result<Vec<ChangeBundle>> {
+    fn get_author_changes_since_uuid(
+        &self,
+        author_path: &str,
+        since_uuid: &str,
+    ) -> Result<Vec<ChangeBundle>> {
         // List change files for this author
         let mut change_files = self.storage.list(author_path)?;
-        
+
         // Sort files by name (which contain UUIDs, so they'll be in chronological order)
         change_files.sort();
-        
+
         let mut bundles = Vec::new();
-        
+
         // If since_uuid is the null UUID, return all files
         let is_null_uuid = since_uuid == "00000000-0000-0000-0000-000000000000";
 
@@ -337,7 +369,10 @@ impl SyncClient {
 
             // Extract UUID from filename
             if let Some(filename) = file_path.split('/').last() {
-                if let Some(uuid_part) = filename.strip_prefix("changes-").and_then(|s| s.strip_suffix(".json")) {
+                if let Some(uuid_part) = filename
+                    .strip_prefix("changes-")
+                    .and_then(|s| s.strip_suffix(".json"))
+                {
                     // If null UUID, include all files; otherwise only include files with UUID > since_uuid
                     if !is_null_uuid && uuid_part <= since_uuid {
                         continue; // Skip files up to and including since_uuid
@@ -361,10 +396,14 @@ impl SyncClient {
         for bundle in change_bundles {
             if !bundle.changes.is_empty() {
                 db.apply_remote_changes_with_author(&bundle.changes, &bundle.author)?;
-                log::info!("Successfully applied {} changes from author {}", bundle.changes.len(), bundle.author);
+                log::info!(
+                    "Successfully applied {} changes from author {}",
+                    bundle.changes.len(),
+                    bundle.author
+                );
             }
         }
-        
+
         Ok(())
     }
 
@@ -386,7 +425,7 @@ impl SyncClient {
         } else {
             0
         };
-        
+
         let timestamp_range = TimestampRange {
             start: start_timestamp,
             end: end_timestamp,
@@ -404,7 +443,7 @@ impl SyncClient {
         } else {
             return Ok(()); // No changes to push
         };
-        
+
         let filename = format!("changes-{}.json", latest_change_id);
 
         let path = if self.config.base_path.is_empty() {
@@ -425,21 +464,24 @@ impl SyncClient {
         // Extract timestamp from UUIDv7 change ID
         // UUIDv7 encodes timestamp in the first 48 bits
         if let Ok(uuid) = uuid::Uuid::parse_str(&change.id) {
-            if uuid.get_version() == Some(uuid::Version::SortRand) { // UUIDv7 version
+            if uuid.get_version() == Some(uuid::Version::SortRand) {
+                // UUIDv7 version
                 // Extract timestamp from UUIDv7 (first 48 bits are milliseconds since Unix epoch)
                 let bytes = uuid.as_bytes();
                 let timestamp_ms = u64::from_be_bytes([
                     0, 0, // pad to 8 bytes
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                 ]);
                 return Ok(timestamp_ms as i64);
             }
         }
-        
-        // If we can't extract timestamp from UUIDv7, this is an error
-        Err(anyhow::anyhow!("Failed to extract timestamp from change ID: {}", change.id))
-    }
 
+        // If we can't extract timestamp from UUIDv7, this is an error
+        Err(anyhow::anyhow!(
+            "Failed to extract timestamp from change ID: {}",
+            change.id
+        ))
+    }
 
     fn get_latest_pushed_uuid(&self, author: &str) -> Result<String> {
         // List files for this author to find the latest pushed UUID
@@ -448,49 +490,59 @@ impl SyncClient {
         } else {
             format!("{}/authors/{}/", self.config.base_path, author)
         };
-        
+
         let mut files = self.storage.list(&author_prefix)?;
-        
+
         // Sort filenames - since they contain UUIDs, the latest will be last
         files.sort();
-        
+
         // Extract UUID from the latest filename
         if let Some(latest_file) = files.last() {
             if let Some(filename) = latest_file.split('/').last() {
-                if let Some(uuid_part) = filename.strip_prefix("changes-").and_then(|s| s.strip_suffix(".json")) {
+                if let Some(uuid_part) = filename
+                    .strip_prefix("changes-")
+                    .and_then(|s| s.strip_suffix(".json"))
+                {
                     return Ok(uuid_part.to_string());
                 }
             }
         }
-        
+
         // Return null UUID if no files found
         Ok("00000000-0000-0000-0000-000000000000".to_string())
     }
 
     fn push_new_changes(&self, db: &Db) -> Result<()> {
         let author = db.get_author();
-        
+
         // Get the UUID of the latest pushed change for this author
         let latest_pushed_uuid = self.get_latest_pushed_uuid(author)?;
-        
-        log::info!("Latest pushed UUID for author {}: {}", author, latest_pushed_uuid);
-        
+
+        log::info!(
+            "Latest pushed UUID for author {}: {}",
+            author,
+            latest_pushed_uuid
+        );
+
         // Get changes since the latest pushed UUID
         let new_changes = db.get_changes_since_uuid(&latest_pushed_uuid)?;
-        
+
         if new_changes.is_empty() {
             log::info!("No new changes to push for author {}", author);
             return Ok(());
         }
-        
-        log::info!("Found {} new changes to push for author {}", new_changes.len(), author);
-        
+
+        log::info!(
+            "Found {} new changes to push for author {}",
+            new_changes.len(),
+            author
+        );
+
         // Push only the new changes
         self.push_local_changes(&new_changes, author)?;
-        
+
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -501,7 +553,10 @@ mod tests {
     fn test_sync_config_default() {
         let config = SyncConfig::default();
         assert_eq!(config.region, "us-east-1");
-        assert_eq!(config.change_batch_window, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(
+            config.change_batch_window,
+            Duration::from_secs(24 * 60 * 60)
+        );
         assert_eq!(config.sync_interval, Duration::from_secs(60));
     }
 
@@ -510,14 +565,20 @@ mod tests {
         let bundle = ChangeBundle {
             author: "test-author".to_string(),
             changes: vec![],
-            timestamp_range: TimestampRange { start: 100, end: 200 },
+            timestamp_range: TimestampRange {
+                start: 100,
+                end: 200,
+            },
         };
 
         let json = serde_json::to_string(&bundle)?;
         let deserialized: ChangeBundle = serde_json::from_str(&json)?;
 
         assert_eq!(bundle.author, deserialized.author);
-        assert_eq!(bundle.timestamp_range.start, deserialized.timestamp_range.start);
+        assert_eq!(
+            bundle.timestamp_range.start,
+            deserialized.timestamp_range.start
+        );
         assert_eq!(bundle.timestamp_range.end, deserialized.timestamp_range.end);
 
         Ok(())
@@ -568,13 +629,11 @@ mod tests {
 
         // Create a database and set up table
         let db = crate::db::Db::open_memory()?;
-        db.migrate(&[
-            "CREATE TABLE TestEntity (
+        db.migrate(&["CREATE TABLE TestEntity (
                 key TEXT NOT NULL PRIMARY KEY,
                 name TEXT NOT NULL,
                 value INTEGER NOT NULL
-            );"
-        ])?;
+            );"])?;
 
         // Create sync client with in-memory storage
         let config = SyncConfig::default();
@@ -618,13 +677,13 @@ mod tests {
         // Create two databases with the same schema
         let db1 = crate::db::Db::open_memory()?;
         let db2 = crate::db::Db::open_memory()?;
-        
+
         let migration = "CREATE TABLE TestEntity (
             key TEXT NOT NULL PRIMARY KEY,
             name TEXT NOT NULL,
             value INTEGER NOT NULL
         );";
-        
+
         db1.migrate(&[migration])?;
         db2.migrate(&[migration])?;
 
@@ -670,8 +729,10 @@ mod tests {
         sync_client1.sync(&db1)?;
 
         // Verify both databases now have both entities
-        let entities_in_db1: Vec<TestEntity> = db1.query("SELECT * FROM TestEntity ORDER BY name", &[])?;
-        let entities_in_db2: Vec<TestEntity> = db2.query("SELECT * FROM TestEntity ORDER BY name", &[])?;
+        let entities_in_db1: Vec<TestEntity> =
+            db1.query("SELECT * FROM TestEntity ORDER BY name", &[])?;
+        let entities_in_db2: Vec<TestEntity> =
+            db2.query("SELECT * FROM TestEntity ORDER BY name", &[])?;
 
         assert_eq!(entities_in_db1.len(), 2);
         assert_eq!(entities_in_db2.len(), 2);
@@ -700,13 +761,13 @@ mod tests {
 
         let db1 = crate::db::Db::open_memory()?;
         let db2 = crate::db::Db::open_memory()?;
-        
+
         let migration = "CREATE TABLE TestEntity (
             key TEXT NOT NULL PRIMARY KEY,
             name TEXT NOT NULL,
             value INTEGER NOT NULL
         );";
-        
+
         db1.migrate(&[migration])?;
         db2.migrate(&[migration])?;
 
@@ -752,7 +813,10 @@ mod tests {
         sync_client2.sync(&db2)?;
 
         // Verify db2 has the final state
-        let entities_in_db2: Vec<TestEntity> = db2.query("SELECT * FROM TestEntity WHERE key = ?", &[&saved_entity.key])?;
+        let entities_in_db2: Vec<TestEntity> = db2.query(
+            "SELECT * FROM TestEntity WHERE key = ?",
+            &[&saved_entity.key],
+        )?;
         assert_eq!(entities_in_db2.len(), 1);
         assert_eq!(entities_in_db2[0].name, "final-entity");
         assert_eq!(entities_in_db2[0].value, 3);
@@ -769,13 +833,11 @@ mod tests {
             .try_init();
 
         let db = crate::db::Db::open_memory()?;
-        db.migrate(&[
-            "CREATE TABLE TestEntity (
+        db.migrate(&["CREATE TABLE TestEntity (
                 key TEXT NOT NULL PRIMARY KEY,
                 name TEXT NOT NULL,
                 value INTEGER NOT NULL
-            );"
-        ])?;
+            );"])?;
 
         let config = SyncConfig::default();
         let sync_client = SyncClient::new_with_memory(config);
@@ -820,7 +882,7 @@ mod tests {
             "test-access-key",
             "test-secret-key",
         );
-        
+
         // Should succeed in creating the storage instance
         assert!(result.is_ok());
         Ok(())
