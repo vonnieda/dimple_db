@@ -360,7 +360,7 @@ mod tests {
 
         // Create a database and set up table
         let db = crate::db::Db::open_memory()?;
-        db.migrate(&["CREATE TABLE TestEntity (
+        db.migrate_sql(&["CREATE TABLE TestEntity (
                 key TEXT NOT NULL PRIMARY KEY,
                 name TEXT NOT NULL,
                 value INTEGER NOT NULL
@@ -417,8 +417,8 @@ mod tests {
             value INTEGER NOT NULL
         );";
 
-        db1.migrate(&[migration])?;
-        db2.migrate(&[migration])?;
+        db1.migrate_sql(&[migration])?;
+        db2.migrate_sql(&[migration])?;
 
         // Create sync engines sharing the same in-memory target
         let config = SyncConfig::default();
@@ -501,8 +501,8 @@ mod tests {
             value INTEGER NOT NULL
         );";
 
-        db1.migrate(&[migration])?;
-        db2.migrate(&[migration])?;
+        db1.migrate_sql(&[migration])?;
+        db2.migrate_sql(&[migration])?;
 
         // Create sync engines with shared target
         let shared_target = InMemoryStorage::new();
@@ -566,7 +566,7 @@ mod tests {
             .try_init();
 
         let db = crate::db::Db::open_memory()?;
-        db.migrate(&["CREATE TABLE TestEntity (
+        db.migrate_sql(&["CREATE TABLE TestEntity (
                 key TEXT NOT NULL PRIMARY KEY,
                 name TEXT NOT NULL,
                 value INTEGER NOT NULL

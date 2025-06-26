@@ -5,12 +5,14 @@ Reactive data store with S3 compatible synchronization based on SQLite.
 Designed for storing and syncing user data across devices in local-first
 applications. Inspired by Apple's Core Data + CloudKit.
 
+
 ## Features
 
 - Plain SQLite flavored SQL for queries, schemas, and migrations.
 - CRUD operations automatically track changes.
 - Subscribe to query results to get updates when data changes.
 - Sync via *any* S3 compatible endpoint with optional passphrase encryption.
+
 
 ## Inspiration
 

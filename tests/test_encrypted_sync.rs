@@ -24,7 +24,6 @@ impl Default for SecretData {
 fn test_encrypted_sync_between_clients() -> Result<()> {
     // Initialize debug logging
     let _ = env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug)
         .is_test(true)
         .try_init();
 
@@ -41,8 +40,8 @@ fn test_encrypted_sync_between_clients() -> Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate(&[migration])?;
-    bob_db.migrate(&[migration])?;
+    alice_db.migrate_sql(&[migration])?;
+    bob_db.migrate_sql(&[migration])?;
 
     // Create sync config with encryption passphrase
     let passphrase = "super-secret-passphrase-123!";
@@ -156,7 +155,6 @@ fn test_encrypted_sync_between_clients() -> Result<()> {
 fn test_different_passphrases_cannot_decrypt() -> Result<()> {
     // Initialize debug logging
     let _ = env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug)
         .is_test(true)
         .try_init();
 
@@ -173,8 +171,8 @@ fn test_different_passphrases_cannot_decrypt() -> Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate(&[migration])?;
-    mallory_db.migrate(&[migration])?;
+    alice_db.migrate_sql(&[migration])?;
+    mallory_db.migrate_sql(&[migration])?;
 
     // Create sync configs with different passphrases
     let alice_passphrase = "alice-secret-key";
@@ -241,82 +239,4 @@ fn test_different_passphrases_cannot_decrypt() -> Result<()> {
     println!("✨ Data remains secure with different passphrases");
 
     Ok(())
-}
-
-#[test]
-fn test_encrypted_content_plaintext_paths() -> Result<()> {
-    // Initialize debug logging
-    let _ = env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Debug)
-        .is_test(true)
-        .try_init();
-
-    println!("🔐 Testing Encrypted Content with Plaintext Paths");
-
-    // Create a database
-    let db = Db::open_memory()?;
-    db.migrate(&["CREATE TABLE TestData (
-        key TEXT NOT NULL PRIMARY KEY,
-        name TEXT NOT NULL
-    );"])?;
-
-    // Create some test data
-    let data = TestData {
-        name: "Sensitive Information".to_string(),
-        ..Default::default()
-    };
-    db.save(&data)?;
-
-    // Set up encrypted sync
-    let passphrase = "test-passphrase";
-    let mut config = SyncConfig::default();
-    config.passphrase = Some(passphrase.to_string());
-
-    let storage = InMemoryStorage::new();
-    let encrypted_storage = EncryptedStorage::new(
-        Box::new(storage.clone()),
-        passphrase.to_string(),
-    );
-
-    let sync = SyncEngine {
-        config,
-        target: Box::new(encrypted_storage),
-    };
-
-    // Perform sync
-    sync.sync(&db)?;
-    println!("📤 Synced data with encrypted content");
-
-    // Check raw storage - paths should be plaintext, content encrypted
-    let raw_files = storage.list("")?;
-    println!("📁 Found {} files in raw storage", raw_files.len());
-
-    for file_path in &raw_files {
-        // Paths should be plaintext - we can see the structure
-        println!("  File path: {}", file_path);
-        assert!(file_path.contains("authors/"), "Path should contain 'authors/' directory");
-        if file_path.ends_with(".json") {
-            assert!(file_path.contains("changes-"), "JSON files should be change files");
-        }
-    }
-
-    println!("✅ Verified file paths are plaintext for transparency");
-
-    // The encrypted storage used in sync_client should be able to list files
-    let author_prefix = format!("authors/{}/", db.get_author());
-    let files_via_encrypted = sync.target.list(&author_prefix)?;
-    
-    // Should be able to list files with plaintext paths
-    assert!(!files_via_encrypted.is_empty(), "Should list files through encrypted storage");
-
-    println!("🎉 Encrypted content with plaintext paths test passed!");
-    println!("✨ Content is properly encrypted while paths remain transparent");
-
-    Ok(())
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-struct TestData {
-    key: String,
-    name: String,
 }

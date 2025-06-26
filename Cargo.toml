@@ -1,20 +1,26 @@
 [package]
 name = "dimple_data"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "Reactive data store with S3 compatible synchronization based on SQLite"
+license = "MIT"
+repository = "https://github.com/vonnieda/dimple_data"
+homepage = "https://github.com/vonnieda/dimple_data"
+keywords = ["database", "sqlite", "sync", "s3", "reactive", "localfirst"]
+categories = ["database-implementations"]
 
 [dependencies]
 log = "0.4"
 anyhow = "1.0"
-rusqlite = "0.36"
-serde = { version = "1.0", features = ["derive"] }
-serde_rusqlite = "0.39"
 uuid = { version = "1.17", features = ["v7"] }
+rusqlite = "0.36"
+rusqlite_migration = { version = "2.2", features = ["from-directory"] }
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rusqlite_migration = "2.2"
+serde_rusqlite = "0.39"
 rust-s3 = { version = "0.33.0", features = ["sync-native-tls"], default-features = false }
-base64 = "0.22.1"
 age = "0.11.1"
+include_dir = "0.7.4"
 
 [dev-dependencies]
 env_logger = "0.11"

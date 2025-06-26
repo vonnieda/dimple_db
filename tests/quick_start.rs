@@ -1,29 +1,3 @@
-/*!
- * Dimple Data Quick Start Tests
- *
- * This file contains comprehensive integration tests that demonstrate all major features
- * of the Dimple Data library working together:
- *
- * ## Features Demonstrated:
- *
- * 1. **Database Migration** - Schema version management with incremental migrations
- * 2. **CRUD Operations** - Create, Read, Update, Delete with automatic UUIDv7 key generation
- * 3. **Change Tracking** - Automatic tracking of all data modifications with UUIDv7 ordering
- * 4. **Reactive Queries** - Live query subscriptions that update when underlying data changes
- * 5. **Encrypted Sync** - UUIDv7-based distributed synchronization with age encryption
- * 6. **Author Isolation** - Multi-author sync with conflict resolution
- * 7. **Complex Queries** - JOIN operations, aggregations, and advanced SQL features
- *
- * ## Tests:
- *
- * - `quick_start_comprehensive_demo`: Full end-to-end scenario with two users (Alice & Bob)
- *   syncing data between databases with complete change tracking
- *   
- * - `quick_start_reactive_queries_demo`: Focused demonstration of reactive query capabilities
- *
- * These tests serve as both verification of functionality and documentation of usage patterns.
- */
-
 use dimple_data::db::Db;
 use dimple_data::sync::{SyncTarget, SyncEngine, SyncConfig};
 use serde::{Deserialize, Serialize};
@@ -112,8 +86,8 @@ fn quick_start_comprehensive_demo() -> anyhow::Result<()> {
     ];
 
     // Apply migrations to both databases
-    alice_db.migrate(migrations)?;
-    bob_db.migrate(migrations)?;
+    alice_db.migrate_sql(migrations)?;
+    bob_db.migrate_sql(migrations)?;
 
     println!("✅ Migrations applied successfully to both databases");
 
@@ -429,7 +403,7 @@ fn quick_start_reactive_queries_demo() -> anyhow::Result<()> {
     let db = Db::open_memory()?;
 
     // Simple schema
-    db.migrate(&["CREATE TABLE User (
+    db.migrate_sql(&["CREATE TABLE User (
             key TEXT NOT NULL PRIMARY KEY,
             name TEXT NOT NULL,
             email TEXT NOT NULL,
@@ -510,8 +484,8 @@ fn test_repeated_sync_no_bloat() -> anyhow::Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate(&[migration])?;
-    bob_db.migrate(&[migration])?;
+    alice_db.migrate_sql(&[migration])?;
+    bob_db.migrate_sql(&[migration])?;
 
     // Set up sync with shared storage
     let sync_config = SyncConfig::default();
