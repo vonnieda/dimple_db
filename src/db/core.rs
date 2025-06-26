@@ -97,36 +97,39 @@ impl Db {
     }
 
     fn get_or_create_database_uuid(&self) -> anyhow::Result<String> {
-        let conn = self
+        let mut conn = self
             .conn
-            .read()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+
+        // Use a transaction to ensure atomicity
+        let tx = conn.transaction()?;
 
         // Try to get existing UUID
-        let existing_uuid = conn.query_row(
+        let existing_uuid = tx.query_row(
             "SELECT value FROM _metadata WHERE key = 'database_uuid'",
             [],
             |row| row.get::<_, String>(0),
         );
 
         match existing_uuid {
-            Ok(uuid) => Ok(uuid),
-            Err(_) => {
+            Ok(uuid) => {
+                tx.commit()?;
+                Ok(uuid)
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Create new UUID and store it
-                drop(conn); // Release read lock
-                let conn = self
-                    .conn
-                    .write()
-                    .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
                 let new_uuid = Uuid::now_v7().to_string();
 
-                conn.execute(
+                tx.execute(
                     "INSERT INTO _metadata (key, value) VALUES ('database_uuid', ?)",
                     [&new_uuid],
                 )?;
 
+                tx.commit()?;
                 Ok(new_uuid)
             }
+            Err(e) => Err(e.into()),
         }
     }
 

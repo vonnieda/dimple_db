@@ -177,15 +177,6 @@ impl Db {
         )
     }
 
-    pub fn apply_changes(&self, changes: &[Change]) -> anyhow::Result<()> {
-        self.apply_remote_changes(changes)
-    }
-
-    pub fn apply_remote_changes(&self, changes: &[Change]) -> anyhow::Result<()> {
-        // This is a fallback that shouldn't be used for new code
-        // Use apply_remote_changes_with_author instead
-        self.apply_remote_changes_with_author(changes, "unknown")
-    }
 
     pub fn apply_remote_changes_with_author(
         &self,
@@ -404,15 +395,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_transactions_since(&self, timestamp: i64) -> anyhow::Result<Vec<Transaction>> {
-        self.query(
-            "SELECT id, timestamp, author, bundle_id 
-             FROM _transaction 
-             WHERE timestamp > ? 
-             ORDER BY timestamp ASC",
-            &[&timestamp],
-        )
-    }
 
     pub fn get_latest_uuid_for_author(&self, author: &str) -> anyhow::Result<String> {
         let conn = self

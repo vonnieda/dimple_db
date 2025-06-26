@@ -258,13 +258,6 @@ impl Db {
         Ok(subscriptions.len())
     }
 
-    pub fn remove_subscription(&self, subscription_id: &str) -> anyhow::Result<bool> {
-        let mut subscriptions = self
-            .subscriptions
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on subscriptions"))?;
-        Ok(subscriptions.remove(subscription_id).is_some())
-    }
 }
 
 #[cfg(test)]

@@ -52,11 +52,6 @@ pub struct QuerySubscription {
     pub last_result_hash: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct QueryChange<T> {
-    pub subscription_id: String,
-    pub new_result: QueryResult<T>,
-}
 
 pub struct QueryObserver {
     pub(crate) subscription_id: String,
