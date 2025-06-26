@@ -1,6 +1,8 @@
 # Dimple Data
 
-Dimple Data is a reactive data store with S3 synchronization based on SQLite. It is inspired by Apple's Core Data + CloudKit and is designed for storing and syncing user data across devices in local-first applications.
+Dimple Data is a reactive data store with S3 synchronization based on SQLite. 
+It is inspired by Apple's Core Data + CloudKit and is designed for storing and 
+syncing user data across devices in local-first applications.
 
 ## Features
 
@@ -21,11 +23,13 @@ Dimple Data is a reactive data store with S3 synchronization based on SQLite. It
 - Author-based conflict resolution and change attribution  
 - Stateless sync supporting multiple endpoints
 - Prevention of storage/database bloat from repeated operations
+- Optional passphrase-based encryption for synced content
 
 ✅ **Storage Abstraction**
 - S3Storage for production (AWS S3, MinIO, etc.)
 - LocalStorage for file-based testing
 - InMemoryStorage for unit testing
+- EncryptedStorage wrapper for end-to-end encryption
 - Consistent interface across all storage backends
 
 ✅ **Change Tracking**
@@ -83,6 +87,7 @@ let config = SyncConfig {
     bucket: "my-app-data".to_string(),
     access_key: "...".to_string(),
     secret_key: "...".to_string(),
+    passphrase: Some("my-encryption-key".to_string()), // Optional encryption
     ..Default::default()
 };
 let sync_client = SyncClient::new_with_s3(config)?;
@@ -95,6 +100,40 @@ sync_client.sync(&db)?;
 - **Reactive Layer**: Query subscriptions with dependency tracking
 - **Sync Layer**: UUIDv7-based incremental synchronization 
 - **Storage Layer**: Pluggable backends (S3, Local, Memory)
+- **Encryption Layer**: Optional end-to-end encryption using age
+
+## Encryption
+
+When a passphrase is provided in `SyncConfig`, Dimple Data automatically encrypts all synced content using the [age](https://github.com/FiloSottile/age) encryption library:
+
+### What Gets Encrypted
+- **File Content**: All JSON change bundles are encrypted with age using scrypt-derived keys
+- **File Paths**: Stored in plaintext for transparency and simplicity
+
+### How It Works
+1. **Key Derivation**: The passphrase is used with age's scrypt key derivation to create encryption keys
+2. **Content Encryption**: Each file's content is encrypted using age with a unique random nonce
+3. **Storage**: Encrypted binary data is stored directly (no armor/base64 encoding)
+4. **Decryption**: Clients with the same passphrase can decrypt and read the data
+
+### Security Properties
+- **Forward Secrecy**: Each file uses a unique random nonce
+- **Authenticated Encryption**: age provides built-in authentication
+- **Key Stretching**: scrypt makes brute-force attacks computationally expensive
+- **Cross-Platform**: Works consistently across all supported storage backends
+
+### Usage
+```rust
+let config = SyncConfig {
+    bucket: "my-app-data".to_string(),
+    access_key: "...".to_string(),
+    secret_key: "...".to_string(),
+    passphrase: Some("your-secure-passphrase".to_string()), // Enable encryption
+    ..Default::default()
+};
+```
+
+**Note**: All clients must use the same passphrase to sync encrypted data. Clients with different passphrases cannot decrypt each other's data.
 
 ## Testing
 

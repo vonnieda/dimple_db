@@ -12,8 +12,8 @@ use crate::db::{Change, Db};
 
 pub trait Storage {
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
-    fn get(&self, path: &str) -> Result<String>;
-    fn put(&self, path: &str, content: &str) -> Result<()>;
+    fn get(&self, path: &str) -> Result<Vec<u8>>;
+    fn put(&self, path: &str, content: &[u8]) -> Result<()>;
 }
 
 pub struct S3Storage {
@@ -53,18 +53,17 @@ impl Storage for S3Storage {
         Ok(keys)
     }
 
-    fn get(&self, path: &str) -> Result<String> {
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
         log::debug!("STORAGE GET: path='{}'", path);
         let response = self.bucket.get_object(path)?;
-        let bytes = response.bytes();
-        let content = String::from_utf8(bytes.to_vec())?;
-        log::debug!("STORAGE GET RESULT: {} bytes", content.len());
-        Ok(content)
+        let bytes = response.bytes().to_vec();
+        log::debug!("STORAGE GET RESULT: {} bytes", bytes.len());
+        Ok(bytes)
     }
 
-    fn put(&self, path: &str, content: &str) -> Result<()> {
+    fn put(&self, path: &str, content: &[u8]) -> Result<()> {
         log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
-        self.bucket.put_object(path, content.as_bytes())?;
+        self.bucket.put_object(path, content)?;
         log::debug!("STORAGE PUT RESULT: success");
         Ok(())
     }
@@ -104,15 +103,15 @@ impl Storage for LocalStorage {
         Ok(results)
     }
 
-    fn get(&self, path: &str) -> Result<String> {
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
         log::debug!("STORAGE GET: path='{}'", path);
         let full_path = format!("{}/{}", self.base_path, path);
-        let content = fs::read_to_string(full_path)?;
+        let content = fs::read(full_path)?;
         log::debug!("STORAGE GET RESULT: {} bytes", content.len());
         Ok(content)
     }
 
-    fn put(&self, path: &str, content: &str) -> Result<()> {
+    fn put(&self, path: &str, content: &[u8]) -> Result<()> {
         log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
         let full_path = format!("{}/{}", self.base_path, path);
         if let Some(parent) = Path::new(&full_path).parent() {
@@ -125,7 +124,7 @@ impl Storage for LocalStorage {
 }
 
 pub struct InMemoryStorage {
-    data: Arc<RwLock<HashMap<String, String>>>,
+    data: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl InMemoryStorage {
@@ -162,7 +161,7 @@ impl Storage for InMemoryStorage {
         Ok(results)
     }
 
-    fn get(&self, path: &str) -> Result<String> {
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
         log::debug!("STORAGE GET: path='{}'", path);
         let data = self
             .data
@@ -176,13 +175,13 @@ impl Storage for InMemoryStorage {
         Ok(content)
     }
 
-    fn put(&self, path: &str, content: &str) -> Result<()> {
+    fn put(&self, path: &str, content: &[u8]) -> Result<()> {
         log::debug!("STORAGE PUT: path='{}', size={} bytes", path, content.len());
         let mut data = self
             .data
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
-        data.insert(path.to_string(), content.to_string());
+        data.insert(path.to_string(), content.to_vec());
         log::debug!("STORAGE PUT RESULT: success");
         Ok(())
     }
@@ -196,6 +195,114 @@ impl Clone for InMemoryStorage {
     }
 }
 
+// Storage trait wrapper to allow Arc<dyn Storage> to implement Storage
+#[derive(Clone)]
+pub struct ArcStorage {
+    inner: Arc<dyn Storage>,
+}
+
+impl ArcStorage {
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        Self { inner: storage }
+    }
+}
+
+impl Storage for ArcStorage {
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix)
+    }
+
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.get(path)
+    }
+
+    fn put(&self, path: &str, content: &[u8]) -> Result<()> {
+        self.inner.put(path, content)
+    }
+}
+
+/// EncryptedStorage provides transparent encryption for file content only.
+/// 
+/// This implementation encrypts:
+/// - File content: Encrypted using age with passphrase-derived keys
+/// 
+/// File paths are stored in plaintext for simplicity. The security benefit
+/// of encrypting paths is minimal since they only reveal that someone is
+/// using Dimple Data for synchronization.
+#[derive(Clone)]
+pub struct EncryptedStorage {
+    inner: ArcStorage,
+    passphrase: String,
+}
+
+impl EncryptedStorage {
+    pub fn new(inner: Box<dyn Storage>, passphrase: String) -> Self {
+        Self { 
+            inner: ArcStorage::new(Arc::from(inner)), 
+            passphrase,
+        }
+    }
+    
+    fn create_recipient(&self) -> Result<age::scrypt::Recipient> {
+        use age::secrecy::SecretString;
+        let secret = SecretString::from(self.passphrase.clone());
+        Ok(age::scrypt::Recipient::new(secret))
+    }
+    
+    fn create_identity(&self) -> Result<age::scrypt::Identity> {
+        use age::secrecy::SecretString;
+        let secret = SecretString::from(self.passphrase.clone());
+        Ok(age::scrypt::Identity::new(secret))
+    }
+
+    
+    fn encrypt_bytes(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Use age for proper encryption
+        let recipient = self.create_recipient()?;
+        let encrypted = age::encrypt(&recipient, data)?;
+        Ok(encrypted)
+    }
+    
+    fn decrypt_bytes(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
+        // Use age for proper decryption
+        let identity = self.create_identity()?;
+        let decrypted = age::decrypt(&identity, encrypted)?;
+        Ok(decrypted)
+    }
+    
+}
+
+impl Storage for EncryptedStorage {
+    fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        log::debug!("ENCRYPTED STORAGE LIST: prefix='{}'", prefix);
+        
+        // Pass through to underlying storage - paths are not encrypted
+        self.inner.list(prefix)
+    }
+    
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
+        log::debug!("ENCRYPTED STORAGE GET: path='{}'", path);
+        let encrypted_content = self.inner.get(path)?;
+        
+        // Decrypt the bytes directly
+        let decrypted = self.decrypt_bytes(&encrypted_content)?;
+        
+        log::debug!("ENCRYPTED STORAGE GET RESULT: {} bytes", decrypted.len());
+        Ok(decrypted)
+    }
+    
+    fn put(&self, path: &str, content: &[u8]) -> Result<()> {
+        log::debug!("ENCRYPTED STORAGE PUT: path='{}', size={} bytes", path, content.len());
+        let encrypted_content = self.encrypt_bytes(content)?;
+        
+        // Store encrypted bytes directly
+        self.inner.put(path, &encrypted_content)?;
+        
+        log::debug!("ENCRYPTED STORAGE PUT RESULT: success");
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
     pub endpoint: String,
@@ -206,6 +313,7 @@ pub struct SyncConfig {
     pub region: String,
     pub change_batch_window: Duration,
     pub sync_interval: Duration,
+    pub passphrase: Option<String>,
 }
 
 impl Default for SyncConfig {
@@ -219,6 +327,7 @@ impl Default for SyncConfig {
             region: "us-east-1".to_string(),
             change_batch_window: Duration::from_secs(24 * 60 * 60), // 24 hours
             sync_interval: Duration::from_secs(60),                 // 1 minute
+            passphrase: None,
         }
     }
 }
@@ -251,26 +360,37 @@ impl SyncClient {
             &config.secret_key,
         )?;
 
-        Ok(Self {
-            config,
-            storage: Box::new(storage),
-        })
+        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        } else {
+            Box::new(storage)
+        };
+
+        Ok(Self { config, storage })
     }
 
     pub fn new_with_local(config: SyncConfig, base_path: &str) -> Self {
         let storage = LocalStorage::new(base_path);
-        Self {
-            config,
-            storage: Box::new(storage),
-        }
+        
+        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        } else {
+            Box::new(storage)
+        };
+        
+        Self { config, storage }
     }
 
     pub fn new_with_memory(config: SyncConfig) -> Self {
         let storage = InMemoryStorage::new();
-        Self {
-            config,
-            storage: Box::new(storage),
-        }
+        
+        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        } else {
+            Box::new(storage)
+        };
+        
+        Self { config, storage }
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
@@ -381,7 +501,9 @@ impl SyncClient {
             }
 
             // Download and parse the change bundle
-            let content = self.storage.get(&file_path)?;
+            let content_bytes = self.storage.get(&file_path)?;
+            let content = String::from_utf8(content_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
             let bundle: ChangeBundle = serde_json::from_str(&content)?;
             bundles.push(bundle);
         }
@@ -454,7 +576,7 @@ impl SyncClient {
 
         // Upload to storage
         let content = serde_json::to_string(&bundle)?;
-        self.storage.put(&path, &content)?;
+        self.storage.put(&path, content.as_bytes())?;
 
         log::info!("Pushed changes to {}", path);
         Ok(())
@@ -589,14 +711,14 @@ mod tests {
         let storage = InMemoryStorage::new();
 
         // Test put and get
-        storage.put("test/path/file.json", "{\"test\": \"data\"}")?;
+        storage.put("test/path/file.json", b"{\"test\": \"data\"}")?;
         let content = storage.get("test/path/file.json")?;
-        assert_eq!(content, "{\"test\": \"data\"}");
+        assert_eq!(content, b"{\"test\": \"data\"}");
 
         // Test list with prefix
-        storage.put("test/path/file1.json", "data1")?;
-        storage.put("test/path/file2.json", "data2")?;
-        storage.put("other/file.json", "other")?;
+        storage.put("test/path/file1.json", b"data1")?;
+        storage.put("test/path/file2.json", b"data2")?;
+        storage.put("other/file.json", b"other")?;
 
         let files = storage.list("test/path/")?;
         assert_eq!(files.len(), 3); // file.json, file1.json, file2.json
@@ -656,7 +778,9 @@ mod tests {
         assert!(!files.is_empty());
 
         // Verify the change bundle contains our entity
-        let file_content = sync_client.storage.get(&files[0])?;
+        let file_content_bytes = sync_client.storage.get(&files[0])?;
+        let file_content = String::from_utf8(file_content_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
         let bundle: ChangeBundle = serde_json::from_str(&file_content)?;
         assert_eq!(bundle.author, db.get_author());
         assert_eq!(bundle.changes.len(), 1);
