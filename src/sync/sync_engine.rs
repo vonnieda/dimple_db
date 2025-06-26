@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Change, Db};
-use super::sync_storage::{SyncTarget, S3Storage, LocalStorage, InMemoryStorage, EncryptedStorage};
+use super::sync_target::{SyncTarget, S3Storage, LocalStorage, InMemoryStorage, EncryptedStorage};
 
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
