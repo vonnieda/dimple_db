@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock, Mutex};
 use anyhow::Result;
 use s3::{Bucket, Region, creds::Credentials};
 
-pub trait SyncStorage {
+pub trait SyncTarget {
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
     fn get(&self, path: &str) -> Result<Vec<u8>>;
     fn put(&self, path: &str, content: &[u8]) -> Result<()>;
@@ -31,7 +31,7 @@ impl S3Storage {
     }
 }
 
-impl SyncStorage for S3Storage {
+impl SyncTarget for S3Storage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let results = self
@@ -77,7 +77,7 @@ impl LocalStorage {
     }
 }
 
-impl SyncStorage for LocalStorage {
+impl SyncTarget for LocalStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let full_path = format!("{}/{}", self.base_path, prefix);
@@ -137,7 +137,7 @@ impl Default for InMemoryStorage {
     }
 }
 
-impl SyncStorage for InMemoryStorage {
+impl SyncTarget for InMemoryStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let data = self
@@ -191,19 +191,19 @@ impl Clone for InMemoryStorage {
     }
 }
 
-// SyncStorage trait wrapper to allow Arc<dyn SyncStorage> to implement SyncStorage
+// SyncTarget trait wrapper to allow Arc<dyn SyncTarget> to implement SyncTarget
 #[derive(Clone)]
 pub struct ArcStorage {
-    inner: Arc<dyn SyncStorage>,
+    inner: Arc<dyn SyncTarget>,
 }
 
 impl ArcStorage {
-    pub fn new(storage: Arc<dyn SyncStorage>) -> Self {
-        Self { inner: storage }
+    pub fn new(target: Arc<dyn SyncTarget>) -> Self {
+        Self { inner: target }
     }
 }
 
-impl SyncStorage for ArcStorage {
+impl SyncTarget for ArcStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.inner.list(prefix)
     }
@@ -234,7 +234,7 @@ pub struct EncryptedStorage {
 }
 
 impl EncryptedStorage {
-    pub fn new(inner: Box<dyn SyncStorage>, passphrase: String) -> Self {
+    pub fn new(inner: Box<dyn SyncTarget>, passphrase: String) -> Self {
         Self { 
             inner: ArcStorage::new(Arc::from(inner)), 
             passphrase,
@@ -284,7 +284,7 @@ impl EncryptedStorage {
     
 }
 
-impl SyncStorage for EncryptedStorage {
+impl SyncTarget for EncryptedStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("ENCRYPTED STORAGE LIST: prefix='{}'", prefix);
         

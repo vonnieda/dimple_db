@@ -25,7 +25,7 @@
  */
 
 use dimple_data::db::Db;
-use dimple_data::sync::{SyncStorage, SyncClient, SyncConfig};
+use dimple_data::sync::{SyncTarget, SyncEngine, SyncConfig};
 use serde::{Deserialize, Serialize};
 
 // Test entities for our quick start demo
@@ -222,14 +222,14 @@ fn quick_start_comprehensive_demo() -> anyhow::Result<()> {
         "demo-encryption-passphrase-2024".to_string(),
     );
 
-    let alice_sync = SyncClient {
+    let alice_sync = SyncEngine {
         config: sync_config.clone(),
-        storage: Box::new(alice_encrypted_storage),
+        target: Box::new(alice_encrypted_storage),
     };
 
-    let bob_sync = SyncClient {
+    let bob_sync = SyncEngine {
         config: sync_config,
-        storage: Box::new(bob_encrypted_storage),
+        target: Box::new(bob_encrypted_storage),
     };
 
     println!("✅ Sync clients configured with encrypted shared storage");
@@ -517,14 +517,14 @@ fn test_repeated_sync_no_bloat() -> anyhow::Result<()> {
     let sync_config = SyncConfig::default();
     let shared_storage = dimple_data::sync::InMemoryStorage::new();
 
-    let alice_sync = SyncClient {
+    let alice_sync = SyncEngine {
         config: sync_config.clone(),
-        storage: Box::new(shared_storage.clone()),
+        target: Box::new(shared_storage.clone()),
     };
 
-    let bob_sync = SyncClient {
+    let bob_sync = SyncEngine {
         config: sync_config,
-        storage: Box::new(shared_storage.clone()),
+        target: Box::new(shared_storage.clone()),
     };
 
     println!("✅ Set up Alice and Bob databases with sync");

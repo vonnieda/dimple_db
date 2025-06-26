@@ -1,5 +1,5 @@
 use dimple_data::db::Db;
-use dimple_data::sync::{SyncStorage, SyncClient, SyncConfig, InMemoryStorage, EncryptedStorage};
+use dimple_data::sync::{SyncTarget, SyncEngine, SyncConfig, InMemoryStorage, EncryptedStorage};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 
@@ -56,14 +56,14 @@ fn test_encrypted_sync_between_clients() -> Result<()> {
         passphrase.to_string(),
     );
     
-    let alice_sync = SyncClient {
+    let alice_sync = SyncEngine {
         config: sync_config.clone(),
-        storage: Box::new(shared_encrypted_storage.clone()),
+        target: Box::new(shared_encrypted_storage.clone()),
     };
 
-    let bob_sync = SyncClient {
+    let bob_sync = SyncEngine {
         config: sync_config,
-        storage: Box::new(shared_encrypted_storage.clone()),
+        target: Box::new(shared_encrypted_storage.clone()),
     };
 
     println!("✅ Set up Alice and Bob with encrypted sync");
@@ -189,17 +189,17 @@ fn test_different_passphrases_cannot_decrypt() -> Result<()> {
     // Create sync clients with shared storage
     let shared_storage = InMemoryStorage::new();
     
-    let alice_sync = SyncClient {
+    let alice_sync = SyncEngine {
         config: alice_config,
-        storage: Box::new(EncryptedStorage::new(
+        target: Box::new(EncryptedStorage::new(
             Box::new(shared_storage.clone()),
             alice_passphrase.to_string(),
         )),
     };
 
-    let mallory_sync = SyncClient {
+    let mallory_sync = SyncEngine {
         config: mallory_config,
-        storage: Box::new(EncryptedStorage::new(
+        target: Box::new(EncryptedStorage::new(
             Box::new(shared_storage.clone()),
             mallory_passphrase.to_string(),
         )),
@@ -278,13 +278,13 @@ fn test_encrypted_content_plaintext_paths() -> Result<()> {
         passphrase.to_string(),
     );
 
-    let sync_client = SyncClient {
+    let sync = SyncEngine {
         config,
-        storage: Box::new(encrypted_storage),
+        target: Box::new(encrypted_storage),
     };
 
     // Perform sync
-    sync_client.sync(&db)?;
+    sync.sync(&db)?;
     println!("📤 Synced data with encrypted content");
 
     // Check raw storage - paths should be plaintext, content encrypted
@@ -304,7 +304,7 @@ fn test_encrypted_content_plaintext_paths() -> Result<()> {
 
     // The encrypted storage used in sync_client should be able to list files
     let author_prefix = format!("authors/{}/", db.get_author());
-    let files_via_encrypted = sync_client.storage.list(&author_prefix)?;
+    let files_via_encrypted = sync.target.list(&author_prefix)?;
     
     // Should be able to list files with plaintext paths
     assert!(!files_via_encrypted.is_empty(), "Should list files through encrypted storage");

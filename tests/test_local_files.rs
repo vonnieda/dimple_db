@@ -1,5 +1,5 @@
 use dimple_data::db::Db;
-use dimple_data::sync::{SyncClient, SyncConfig};
+use dimple_data::sync::{SyncEngine, SyncConfig};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use std::fs;
@@ -58,8 +58,8 @@ fn test_local_file_sync() -> Result<()> {
         ..Default::default()
     };
 
-    let sync_client1 = SyncClient::new_with_local(config.clone(), &sync_path);
-    let sync_client2 = SyncClient::new_with_local(config, &sync_path);
+    let sync_client1 = SyncEngine::new_with_local(config.clone(), &sync_path);
+    let sync_client2 = SyncEngine::new_with_local(config, &sync_path);
 
     // Add item to db1
     let timestamp = std::time::SystemTime::now()

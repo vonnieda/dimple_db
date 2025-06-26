@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Change, Db};
-use super::sync_storage::{SyncStorage, S3Storage, LocalStorage, InMemoryStorage, EncryptedStorage};
+use super::sync_storage::{SyncTarget, S3Storage, LocalStorage, InMemoryStorage, EncryptedStorage};
 
 #[derive(Debug, Clone)]
 pub struct SyncConfig {
@@ -35,14 +35,14 @@ pub struct ChangeBundle {
     pub changes: Vec<Change>,
 }
 
-pub struct SyncClient {
+pub struct SyncEngine {
     pub config: SyncConfig,
-    pub storage: Box<dyn SyncStorage>,
+    pub target: Box<dyn SyncTarget>,
 }
 
-impl SyncClient {
+impl SyncEngine {
     pub fn new_with_s3(config: SyncConfig) -> Result<Self> {
-        let storage = S3Storage::new(
+        let target = S3Storage::new(
             &config.endpoint,
             &config.bucket,
             &config.region,
@@ -50,37 +50,37 @@ impl SyncClient {
             &config.secret_key,
         )?;
 
-        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
-            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        let target: Box<dyn SyncTarget> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(target), passphrase.clone()))
         } else {
-            Box::new(storage)
+            Box::new(target)
         };
 
-        Ok(Self { config, storage })
+        Ok(Self { config, target })
     }
 
     pub fn new_with_local(config: SyncConfig, base_path: &str) -> Self {
-        let storage = LocalStorage::new(base_path);
+        let target = LocalStorage::new(base_path);
         
-        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
-            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        let target: Box<dyn SyncTarget> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(target), passphrase.clone()))
         } else {
-            Box::new(storage)
+            Box::new(target)
         };
         
-        Self { config, storage }
+        Self { config, target }
     }
 
     pub fn new_with_memory(config: SyncConfig) -> Self {
-        let storage = InMemoryStorage::new();
+        let target = InMemoryStorage::new();
         
-        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
-            Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
+        let target: Box<dyn SyncTarget> = if let Some(passphrase) = &config.passphrase {
+            Box::new(EncryptedStorage::new(Box::new(target), passphrase.clone()))
         } else {
-            Box::new(storage)
+            Box::new(target)
         };
         
-        Self { config, storage }
+        Self { config, target }
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
@@ -108,7 +108,7 @@ impl SyncClient {
         } else {
             format!("{}/authors/", self.config.base_path)
         };
-        let author_dirs = self.storage.list(&authors_prefix)?;
+        let author_dirs = self.target.list(&authors_prefix)?;
 
         let mut all_changes = Vec::new();
 
@@ -162,7 +162,7 @@ impl SyncClient {
         since_uuid: &str,
     ) -> Result<Vec<ChangeBundle>> {
         // List change files for this author
-        let mut change_files = self.storage.list(author_path)?;
+        let mut change_files = self.target.list(author_path)?;
 
         // Sort files by name (which contain UUIDs, so they'll be in chronological order)
         change_files.sort();
@@ -191,7 +191,7 @@ impl SyncClient {
             }
 
             // Download and parse the change bundle
-            let content_bytes = self.storage.get(&file_path)?;
+            let content_bytes = self.target.get(&file_path)?;
             let content = String::from_utf8(content_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
             let bundle: ChangeBundle = serde_json::from_str(&content)?;
@@ -249,7 +249,7 @@ impl SyncClient {
 
         // Upload to storage
         let content = serde_json::to_string_pretty(&bundle)?;
-        self.storage.put(&path, content.as_bytes())?;
+        self.target.put(&path, content.as_bytes())?;
 
         log::info!("Pushed changes to {}", path);
         Ok(())
@@ -264,7 +264,7 @@ impl SyncClient {
             format!("{}/authors/{}/", self.config.base_path, author)
         };
 
-        let mut files = self.storage.list(&author_prefix)?;
+        let mut files = self.target.list(&author_prefix)?;
 
         // Sort filenames - since they contain UUIDs, the latest will be last
         files.sort();
@@ -366,9 +366,9 @@ mod tests {
                 value INTEGER NOT NULL
             );"])?;
 
-        // Create sync client with in-memory storage
+        // Create sync engine with in-memory target
         let config = SyncConfig::default();
-        let sync_client = SyncClient::new_with_memory(config);
+        let sync = SyncEngine::new_with_memory(config);
 
         // Save some test data
         let entity = TestEntity {
@@ -379,15 +379,15 @@ mod tests {
         let saved_entity = db.save(&entity)?;
 
         // Perform sync (should push our changes)
-        sync_client.sync(&db)?;
+        sync.sync(&db)?;
 
         // Verify changes were pushed to storage
         let author_prefix = format!("authors/{}/", db.get_author());
-        let files = sync_client.storage.list(&author_prefix)?;
+        let files = sync.target.list(&author_prefix)?;
         assert!(!files.is_empty());
 
         // Verify the change bundle contains our entity
-        let file_content_bytes = sync_client.storage.get(&files[0])?;
+        let file_content_bytes = sync.target.get(&files[0])?;
         let file_content = String::from_utf8(file_content_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
         let bundle: ChangeBundle = serde_json::from_str(&file_content)?;
@@ -420,20 +420,20 @@ mod tests {
         db1.migrate(&[migration])?;
         db2.migrate(&[migration])?;
 
-        // Create sync clients sharing the same in-memory storage
+        // Create sync engines sharing the same in-memory target
         let config = SyncConfig::default();
-        let sync_client1 = SyncClient::new_with_memory(config.clone());
-        let sync_client2 = SyncClient::new_with_memory(config);
+        let sync1 = SyncEngine::new_with_memory(config.clone());
+        let sync2 = SyncEngine::new_with_memory(config);
 
-        // Create a shared storage for both sync clients
-        let shared_storage = InMemoryStorage::new();
-        let sync_client1 = SyncClient {
-            config: sync_client1.config,
-            storage: Box::new(shared_storage.clone()),
+        // Create a shared target for both sync engines
+        let shared_target = InMemoryStorage::new();
+        let sync1 = SyncEngine {
+            config: sync1.config,
+            target: Box::new(shared_target.clone()),
         };
-        let sync_client2 = SyncClient {
-            config: sync_client2.config,
-            storage: Box::new(shared_storage.clone()),
+        let sync2 = SyncEngine {
+            config: sync2.config,
+            target: Box::new(shared_target.clone()),
         };
 
         // Add entity to db1
@@ -444,8 +444,8 @@ mod tests {
         };
         let saved_entity1 = db1.save(&entity1)?;
 
-        // Sync db1 (pushes changes to shared storage)
-        sync_client1.sync(&db1)?;
+        // Sync db1 (pushes changes to shared target)
+        sync1.sync(&db1)?;
 
         // Add entity to db2
         let entity2 = TestEntity {
@@ -456,10 +456,10 @@ mod tests {
         let saved_entity2 = db2.save(&entity2)?;
 
         // Sync db2 (should pull changes from db1 and push its own changes)
-        sync_client2.sync(&db2)?;
+        sync2.sync(&db2)?;
 
         // Sync db1 again (should pull changes from db2)
-        sync_client1.sync(&db1)?;
+        sync1.sync(&db1)?;
 
         // Verify both databases now have both entities
         let entities_in_db1: Vec<TestEntity> =
@@ -504,16 +504,16 @@ mod tests {
         db1.migrate(&[migration])?;
         db2.migrate(&[migration])?;
 
-        // Create sync clients with shared storage
-        let shared_storage = InMemoryStorage::new();
+        // Create sync engines with shared target
+        let shared_target = InMemoryStorage::new();
         let config = SyncConfig::default();
-        let sync_client1 = SyncClient {
+        let sync1 = SyncEngine {
             config: config.clone(),
-            storage: Box::new(shared_storage.clone()),
+            target: Box::new(shared_target.clone()),
         };
-        let sync_client2 = SyncClient {
+        let sync2 = SyncEngine {
             config,
-            storage: Box::new(shared_storage.clone()),
+            target: Box::new(shared_target.clone()),
         };
 
         // Create entity in db1
@@ -540,10 +540,10 @@ mod tests {
         db1.save(&final_entity)?;
 
         // Sync to push all changes
-        sync_client1.sync(&db1)?;
+        sync1.sync(&db1)?;
 
         // Sync db2 to pull changes
-        sync_client2.sync(&db2)?;
+        sync2.sync(&db2)?;
 
         // Verify db2 has the final state
         let entities_in_db2: Vec<TestEntity> = db2.query(
@@ -573,7 +573,7 @@ mod tests {
             );"])?;
 
         let config = SyncConfig::default();
-        let sync_client = SyncClient::new_with_memory(config);
+        let sync = SyncEngine::new_with_memory(config);
 
         // Add entity and sync
         let entity = TestEntity {
@@ -582,14 +582,14 @@ mod tests {
             ..Default::default()
         };
         db.save(&entity)?;
-        sync_client.sync(&db)?;
+        sync.sync(&db)?;
 
         // Count entities before second sync
         let entities_before: Vec<TestEntity> = db.query("SELECT * FROM TestEntity", &[])?;
         let changes_before = db.get_all_changes()?;
 
         // Sync again - should not duplicate entities
-        sync_client.sync(&db)?;
+        sync.sync(&db)?;
 
         // Count entities after second sync
         let entities_after: Vec<TestEntity> = db.query("SELECT * FROM TestEntity", &[])?;
