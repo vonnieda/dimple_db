@@ -10,7 +10,7 @@
  * 2. **CRUD Operations** - Create, Read, Update, Delete with automatic UUIDv7 key generation
  * 3. **Change Tracking** - Automatic tracking of all data modifications with UUIDv7 ordering
  * 4. **Reactive Queries** - Live query subscriptions that update when underlying data changes
- * 5. **Incremental Sync** - UUIDv7-based distributed synchronization between databases
+ * 5. **Encrypted Sync** - UUIDv7-based distributed synchronization with age encryption
  * 6. **Author Isolation** - Multi-author sync with conflict resolution
  * 7. **Complex Queries** - JOIN operations, aggregations, and advanced SQL features
  *
@@ -203,27 +203,36 @@ fn quick_start_comprehensive_demo() -> anyhow::Result<()> {
     println!("✅ Bob published his post: '{}'", updated_post.title);
 
     // =====================================================
-    // 4. SYNC SETUP AND CONFIGURATION
+    // 4. SYNC SETUP AND CONFIGURATION (WITH ENCRYPTION)
     // =====================================================
-    println!("\n🔄 Step 4: Sync Setup");
+    println!("\n🔄 Step 4: Sync Setup with Encryption");
 
-    // Create sync configuration
-    let sync_config = SyncConfig::default();
+    // Create sync configuration with encryption passphrase
+    let mut sync_config = SyncConfig::default();
+    sync_config.passphrase = Some("demo-encryption-passphrase-2024".to_string());
 
-    // Create sync clients with shared in-memory storage
+    // Create sync clients with shared encrypted storage
     let shared_storage = dimple_data::sync::InMemoryStorage::new();
+    let alice_encrypted_storage = dimple_data::sync::EncryptedStorage::new(
+        Box::new(shared_storage.clone()),
+        "demo-encryption-passphrase-2024".to_string(),
+    );
+    let bob_encrypted_storage = dimple_data::sync::EncryptedStorage::new(
+        Box::new(shared_storage.clone()),
+        "demo-encryption-passphrase-2024".to_string(),
+    );
 
     let alice_sync = SyncClient {
         config: sync_config.clone(),
-        storage: Box::new(shared_storage.clone()),
+        storage: Box::new(alice_encrypted_storage),
     };
 
     let bob_sync = SyncClient {
         config: sync_config,
-        storage: Box::new(shared_storage.clone()),
+        storage: Box::new(bob_encrypted_storage),
     };
 
-    println!("✅ Sync clients configured with shared storage");
+    println!("✅ Sync clients configured with encrypted shared storage");
 
     // =====================================================
     // 5. INCREMENTAL SYNC DEMONSTRATION
@@ -256,6 +265,33 @@ fn quick_start_comprehensive_demo() -> anyhow::Result<()> {
     println!("📊 Alice's database after sync:");
     println!("   Users: {}", all_users_in_alice.len());
     println!("   Posts: {}", all_posts_in_alice.len());
+
+    // =====================================================
+    // 5.1. ENCRYPTION VERIFICATION
+    // =====================================================
+    println!("\n🔐 Step 5.1: Encryption Verification");
+
+    // Check that data is actually encrypted in the raw storage
+    let raw_storage_files = shared_storage.list("")?;
+    println!("📁 Raw storage contains {} files", raw_storage_files.len());
+    
+    // Try to read a file directly from storage - it should be encrypted
+    if let Some(file_path) = raw_storage_files.first() {
+        let encrypted_content = shared_storage.get(file_path)?;
+        // The content should be encrypted binary data
+        assert!(!encrypted_content.is_empty(), "Content should not be empty");
+        
+        // Check that plaintext data is not present in the raw encrypted bytes
+        let content_string = String::from_utf8_lossy(&encrypted_content);
+        assert!(!content_string.contains("Alice"), "Raw content should not contain plaintext names");
+        assert!(!content_string.contains("Bob"), "Raw content should not contain plaintext names");
+        assert!(!content_string.contains("My First Post"), "Raw content should not contain plaintext post titles");
+        assert!(!content_string.contains("alice@example.com"), "Raw content should not contain plaintext emails");
+        
+        println!("✅ Verified data is properly encrypted in storage");
+        println!("   File: {}", file_path);
+        println!("   Encrypted size: {} bytes", encrypted_content.len());
+    }
 
     // =====================================================
     // 6. CHANGE TRACKING VERIFICATION
@@ -374,7 +410,7 @@ fn quick_start_comprehensive_demo() -> anyhow::Result<()> {
 
     println!("🎉 Quick Start Demo Completed Successfully!");
     println!(
-        "✨ All features working: Migration ✓ CRUD ✓ Reactive Queries ✓ Sync ✓ Change Tracking ✓"
+        "✨ All features working: Migration ✓ CRUD ✓ Reactive Queries ✓ Encrypted Sync ✓ Change Tracking ✓"
     );
 
     Ok(())
