@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{Change, Db};
 
-pub trait Storage {
+pub trait SyncStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
     fn get(&self, path: &str) -> Result<Vec<u8>>;
     fn put(&self, path: &str, content: &[u8]) -> Result<()>;
@@ -34,7 +34,7 @@ impl S3Storage {
     }
 }
 
-impl Storage for S3Storage {
+impl SyncStorage for S3Storage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let results = self
@@ -80,7 +80,7 @@ impl LocalStorage {
     }
 }
 
-impl Storage for LocalStorage {
+impl SyncStorage for LocalStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let full_path = format!("{}/{}", self.base_path, prefix);
@@ -140,7 +140,7 @@ impl Default for InMemoryStorage {
     }
 }
 
-impl Storage for InMemoryStorage {
+impl SyncStorage for InMemoryStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("STORAGE LIST: prefix='{}'", prefix);
         let data = self
@@ -194,19 +194,19 @@ impl Clone for InMemoryStorage {
     }
 }
 
-// Storage trait wrapper to allow Arc<dyn Storage> to implement Storage
+// SyncStorage trait wrapper to allow Arc<dyn SyncStorage> to implement SyncStorage
 #[derive(Clone)]
 pub struct ArcStorage {
-    inner: Arc<dyn Storage>,
+    inner: Arc<dyn SyncStorage>,
 }
 
 impl ArcStorage {
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
+    pub fn new(storage: Arc<dyn SyncStorage>) -> Self {
         Self { inner: storage }
     }
 }
 
-impl Storage for ArcStorage {
+impl SyncStorage for ArcStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.inner.list(prefix)
     }
@@ -235,7 +235,7 @@ pub struct EncryptedStorage {
 }
 
 impl EncryptedStorage {
-    pub fn new(inner: Box<dyn Storage>, passphrase: String) -> Self {
+    pub fn new(inner: Box<dyn SyncStorage>, passphrase: String) -> Self {
         Self { 
             inner: ArcStorage::new(Arc::from(inner)), 
             passphrase,
@@ -271,7 +271,7 @@ impl EncryptedStorage {
     
 }
 
-impl Storage for EncryptedStorage {
+impl SyncStorage for EncryptedStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         log::debug!("ENCRYPTED STORAGE LIST: prefix='{}'", prefix);
         
@@ -342,7 +342,7 @@ pub struct TimestampRange {
 
 pub struct SyncClient {
     pub config: SyncConfig,
-    pub storage: Box<dyn Storage>,
+    pub storage: Box<dyn SyncStorage>,
 }
 
 impl SyncClient {
@@ -355,7 +355,7 @@ impl SyncClient {
             &config.secret_key,
         )?;
 
-        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
             Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
         } else {
             Box::new(storage)
@@ -367,7 +367,7 @@ impl SyncClient {
     pub fn new_with_local(config: SyncConfig, base_path: &str) -> Self {
         let storage = LocalStorage::new(base_path);
         
-        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
             Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
         } else {
             Box::new(storage)
@@ -379,7 +379,7 @@ impl SyncClient {
     pub fn new_with_memory(config: SyncConfig) -> Self {
         let storage = InMemoryStorage::new();
         
-        let storage: Box<dyn Storage> = if let Some(passphrase) = &config.passphrase {
+        let storage: Box<dyn SyncStorage> = if let Some(passphrase) = &config.passphrase {
             Box::new(EncryptedStorage::new(Box::new(storage), passphrase.clone()))
         } else {
             Box::new(storage)

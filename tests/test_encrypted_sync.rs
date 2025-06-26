@@ -1,5 +1,5 @@
 use dimple_data::db::Db;
-use dimple_data::sync::{Storage, SyncClient, SyncConfig, InMemoryStorage, EncryptedStorage};
+use dimple_data::sync::{SyncStorage, SyncClient, SyncConfig, InMemoryStorage, EncryptedStorage};
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 

@@ -1,23 +1,23 @@
 # Dimple Data
 
-Dimple Data is a reactive data store with S3 synchronization based on SQLite. 
-It is inspired by Apple's Core Data + CloudKit and is designed for storing and 
-syncing user data across devices in local-first applications without vendor
-lock-in.
+Reactive data store with S3 compatible synchronization based on SQLite.
+
+Designed for storing and syncing user data across devices in local-first
+applications. Inspired by Apple's Core Data + CloudKit.
 
 ## Features
 
-- Plain SQL for queries, schemas, and migrations.
+- Plain SQLite flavored SQL for queries, schemas, and migrations.
+- CRUD operations automatically track changes.
 - Subscribe to query results to get updates when data changes.
-- Sync via *any* S3 compatible endpoint.
-- Sync data can be optionally encrypted with a pass phrase.
+- Sync via *any* S3 compatible endpoint with optional passphrase encryption.
 
-## References
+## Inspiration
 
-- [Drift (Flutter)](https://github.com/simolus3/drift) - Similar local-first database
 - [Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer) - Apple's sync solution
 - [Core Data Tables and Fields](https://fatbobman.com/en/posts/tables_and_fields_of_coredata/) - Core Data implementation patterns
 - [Core Data with CloudKit](https://fatbobman.com/en/posts/coredatawithcloudkit-1/) - CloudKit synchronization guide
+- [Drift (Flutter)](https://github.com/simolus3/drift) - Similar local-first database
 - [rust-s3](https://github.com/durch/rust-s3) - S3 client library
 - [age](https://github.com/FiloSottile/age) - Modern encryption tool
 - [S3 Compatible Services](https://www.s3compare.io/) - Comparison of S3-compatible storage

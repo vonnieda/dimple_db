@@ -25,7 +25,7 @@
  */
 
 use dimple_data::db::Db;
-use dimple_data::sync::{Storage, SyncClient, SyncConfig};
+use dimple_data::sync::{SyncStorage, SyncClient, SyncConfig};
 use serde::{Deserialize, Serialize};
 
 // Test entities for our quick start demo
