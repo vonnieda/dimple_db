@@ -140,6 +140,22 @@ impl Db {
         Ok(db)
     }
 
+    pub fn open<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
+        let conn = Arc::new(RwLock::new(Connection::open(path)?));
+        let db = Db {
+            conn,
+            author: "".to_string(), // Will be set after initialization
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            query_notifier: Arc::new(Notifier::new()),
+        };
+        db.init_connection()?;
+        db.init_change_tracking_tables()?;
+        let author = db.get_or_create_database_uuid()?;
+        let mut db = db;
+        db.author = author;
+        Ok(db)
+    }
+
     fn init_connection(&self) -> anyhow::Result<()> {
         let conn = self
             .conn

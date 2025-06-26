@@ -331,13 +331,6 @@ impl Default for SyncConfig {
 pub struct ChangeBundle {
     pub author: String,
     pub changes: Vec<Change>,
-    pub timestamp_range: TimestampRange,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TimestampRange {
-    pub start: i64,
-    pub end: i64,
 }
 
 pub struct SyncClient {
@@ -532,26 +525,9 @@ impl SyncClient {
         log::info!("Pushing {} local changes", changes.len());
 
         // Create change bundle
-        let start_timestamp = if let Some(first_change) = changes.first() {
-            self.extract_timestamp_from_change(first_change)?
-        } else {
-            0
-        };
-        let end_timestamp = if let Some(last_change) = changes.last() {
-            self.extract_timestamp_from_change(last_change)?
-        } else {
-            0
-        };
-
-        let timestamp_range = TimestampRange {
-            start: start_timestamp,
-            end: end_timestamp,
-        };
-
         let bundle = ChangeBundle {
             author: author.to_string(),
             changes: changes.to_vec(),
-            timestamp_range,
         };
 
         // Generate filename based on latest change UUID
@@ -570,35 +546,13 @@ impl SyncClient {
         };
 
         // Upload to storage
-        let content = serde_json::to_string(&bundle)?;
+        let content = serde_json::to_string_pretty(&bundle)?;
         self.storage.put(&path, content.as_bytes())?;
 
         log::info!("Pushed changes to {}", path);
         Ok(())
     }
 
-    fn extract_timestamp_from_change(&self, change: &Change) -> Result<i64> {
-        // Extract timestamp from UUIDv7 change ID
-        // UUIDv7 encodes timestamp in the first 48 bits
-        if let Ok(uuid) = uuid::Uuid::parse_str(&change.id) {
-            if uuid.get_version() == Some(uuid::Version::SortRand) {
-                // UUIDv7 version
-                // Extract timestamp from UUIDv7 (first 48 bits are milliseconds since Unix epoch)
-                let bytes = uuid.as_bytes();
-                let timestamp_ms = u64::from_be_bytes([
-                    0, 0, // pad to 8 bytes
-                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                ]);
-                return Ok(timestamp_ms as i64);
-            }
-        }
-
-        // If we can't extract timestamp from UUIDv7, this is an error
-        Err(anyhow::anyhow!(
-            "Failed to extract timestamp from change ID: {}",
-            change.id
-        ))
-    }
 
     fn get_latest_pushed_uuid(&self, author: &str) -> Result<String> {
         // List files for this author to find the latest pushed UUID
@@ -677,21 +631,12 @@ mod tests {
         let bundle = ChangeBundle {
             author: "test-author".to_string(),
             changes: vec![],
-            timestamp_range: TimestampRange {
-                start: 100,
-                end: 200,
-            },
         };
 
         let json = serde_json::to_string(&bundle)?;
         let deserialized: ChangeBundle = serde_json::from_str(&json)?;
 
         assert_eq!(bundle.author, deserialized.author);
-        assert_eq!(
-            bundle.timestamp_range.start,
-            deserialized.timestamp_range.start
-        );
-        assert_eq!(bundle.timestamp_range.end, deserialized.timestamp_range.end);
 
         Ok(())
     }
