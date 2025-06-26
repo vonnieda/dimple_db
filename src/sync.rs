@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use anyhow::Result;
 use s3::{Bucket, Region, creds::Credentials};
@@ -311,8 +310,6 @@ pub struct SyncConfig {
     pub access_key: String,
     pub secret_key: String,
     pub region: String,
-    pub change_batch_window: Duration,
-    pub sync_interval: Duration,
     pub passphrase: Option<String>,
 }
 
@@ -325,8 +322,6 @@ impl Default for SyncConfig {
             access_key: "".to_string(),
             secret_key: "".to_string(),
             region: "us-east-1".to_string(),
-            change_batch_window: Duration::from_secs(24 * 60 * 60), // 24 hours
-            sync_interval: Duration::from_secs(60),                 // 1 minute
             passphrase: None,
         }
     }
@@ -675,11 +670,6 @@ mod tests {
     fn test_sync_config_default() {
         let config = SyncConfig::default();
         assert_eq!(config.region, "us-east-1");
-        assert_eq!(
-            config.change_batch_window,
-            Duration::from_secs(24 * 60 * 60)
-        );
-        assert_eq!(config.sync_interval, Duration::from_secs(60));
     }
 
     #[test]
