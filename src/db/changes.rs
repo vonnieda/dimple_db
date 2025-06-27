@@ -4,64 +4,7 @@ use super::core::Db;
 use super::types::{Entity, ChangeType, Change, Transaction};
 
 impl Db {
-    pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
-        let table_name = self.struct_name(entity)?;
-
-        let mut entity_json = serde_json::to_value(entity)?;
-        self.ensure_entity_has_key(&mut entity_json)?;
-
-        let mut conn = self
-            .conn
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
-        let tx = conn.transaction()?;
-
-        let table_columns = self.get_table_columns(&tx, &table_name)?;
-        let all_params = serde_rusqlite::to_params_named(&entity_json)?;
-
-        let key_value = self.extract_key_value_from_json(&entity_json)?;
-        let exists = self.record_exists(&tx, &table_name, &key_value)?;
-
-        // Capture old values for change tracking
-        let old_values = if exists {
-            Some(self.get_record_as_json(&tx, &table_name, &key_value)?)
-        } else {
-            None
-        };
-
-        let change_type = if exists {
-            self.update_record(&tx, &table_name, &key_value, all_params, &table_columns)?;
-            ChangeType::Update
-        } else {
-            self.insert_record(&tx, &table_name, all_params, &table_columns)?;
-            ChangeType::Insert
-        };
-
-        // Record change
-        let new_values = serde_json::to_string(&entity_json)?;
-        self.record_change(
-            &tx,
-            &table_name,
-            &key_value,
-            change_type,
-            old_values,
-            Some(new_values),
-        )?;
-
-        tx.commit()?;
-
-        // Release the write lock before triggering notifications
-        drop(conn);
-
-        // Trigger reactive query notifications after successful commit and lock release
-        self.notify_query_subscribers(&table_name, &key_value)?;
-
-        // Convert back to T for return
-        let final_entity: T = serde_json::from_value(entity_json)?;
-        Ok(final_entity)
-    }
-
-    fn record_change(
+    pub (crate) fn record_change(
         &self,
         tx: &rusqlite::Transaction,
         entity_type: &str,
@@ -84,7 +27,7 @@ impl Db {
             rusqlite::params![
                 transaction_id,
                 timestamp,
-                self.author,
+                self.database_uuid,
                 Option::<String>::None
             ],
         )?;
@@ -176,7 +119,7 @@ impl Db {
                 self.get_transaction_by_id(&tx, &change.transaction_id)
             {
                 // Skip changes from our own author to avoid conflicts
-                if existing_transaction.author == self.author {
+                if existing_transaction.author == self.database_uuid {
                     continue;
                 }
                 // Transaction already exists, just queue the change for application

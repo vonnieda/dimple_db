@@ -5,13 +5,15 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 use uuid::Uuid;
 
+use crate::db::ChangeType;
 use crate::notifier::Notifier;
+use crate::Entity;
 use super::types::QuerySubscription;
 
 #[derive(Clone)]
 pub struct Db {
     pub(crate) conn: Arc<RwLock<Connection>>,
-    pub(crate) author: String,
+    pub(crate) database_uuid: String,
     pub(crate) subscriptions: Arc<RwLock<HashMap<String, QuerySubscription>>>,
     pub(crate) query_notifier: Arc<Notifier<serde_json::Value>>, // Generic JSON notifications
 }
@@ -21,15 +23,15 @@ impl Db {
         let conn = Arc::new(RwLock::new(Connection::open_in_memory()?));
         let db = Db {
             conn,
-            author: "".to_string(), // Will be set after initialization
+            database_uuid: "".to_string(), // Will be set after initialization
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             query_notifier: Arc::new(Notifier::new()),
         };
         db.init_connection()?;
         db.init_change_tracking_tables()?;
-        let author = db.get_or_create_database_uuid()?;
+        let database_uuid = db.get_or_create_database_uuid()?;
         let mut db = db;
-        db.author = author;
+        db.database_uuid = database_uuid;
         Ok(db)
     }
 
@@ -37,15 +39,15 @@ impl Db {
         let conn = Arc::new(RwLock::new(Connection::open(path)?));
         let db = Db {
             conn,
-            author: "".to_string(), // Will be set after initialization
+            database_uuid: "".to_string(), // Will be set after initialization
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             query_notifier: Arc::new(Notifier::new()),
         };
         db.init_connection()?;
         db.init_change_tracking_tables()?;
-        let author = db.get_or_create_database_uuid()?;
+        let database_uuid = db.get_or_create_database_uuid()?;
         let mut db = db;
-        db.author = author;
+        db.database_uuid = database_uuid;
         Ok(db)
     }
 
@@ -159,37 +161,65 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_metadata(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let conn = self
-            .conn
-            .read()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire read lock"))?;
-
-        match conn.query_row("SELECT value FROM _metadata WHERE key = ?", [key], |row| {
-            row.get::<_, String>(0)
-        }) {
-            Ok(value) => Ok(Some(value)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    pub fn get_database_uuid(&self) -> &str {
+        &self.database_uuid
     }
 
-    pub fn set_metadata(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        let conn = self
+    pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
+        let table_name = self.struct_name(entity)?;
+
+        let mut entity_json = serde_json::to_value(entity)?;
+        self.ensure_entity_has_key(&mut entity_json)?;
+
+        let mut conn = self
             .conn
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        let tx = conn.transaction()?;
 
-        conn.execute(
-            "INSERT OR REPLACE INTO _metadata (key, value) VALUES (?, ?)",
-            [key, value],
+        let table_columns = self.get_table_columns(&tx, &table_name)?;
+        let all_params = serde_rusqlite::to_params_named(&entity_json)?;
+
+        let key_value = self.extract_key_value_from_json(&entity_json)?;
+        let exists = self.record_exists(&tx, &table_name, &key_value)?;
+
+        // Capture old values for change tracking
+        let old_values = if exists {
+            Some(self.get_record_as_json(&tx, &table_name, &key_value)?)
+        } else {
+            None
+        };
+
+        let change_type = if exists {
+            self.update_record(&tx, &table_name, &key_value, all_params, &table_columns)?;
+            ChangeType::Update
+        } else {
+            self.insert_record(&tx, &table_name, all_params, &table_columns)?;
+            ChangeType::Insert
+        };
+
+        // Record change
+        let new_values = serde_json::to_string(&entity_json)?;
+        self.record_change(
+            &tx,
+            &table_name,
+            &key_value,
+            change_type,
+            old_values,
+            Some(new_values),
         )?;
 
-        Ok(())
-    }
+        tx.commit()?;
 
-    pub fn get_author(&self) -> &str {
-        &self.author
+        // Release the write lock before triggering notifications
+        drop(conn);
+
+        // Trigger reactive query notifications after successful commit and lock release
+        self.notify_query_subscribers(&table_name, &key_value)?;
+
+        // Convert back to T for return
+        let final_entity: T = serde_json::from_value(entity_json)?;
+        Ok(final_entity)
     }
 
     pub(crate) fn struct_name<T>(&self, _value: &T) -> anyhow::Result<String> {
@@ -425,8 +455,8 @@ mod tests {
         assert_eq!(changes.len(), 1);
 
         // Check that author is a valid UUID
-        assert!(!db.author.is_empty());
-        assert!(uuid::Uuid::parse_str(&db.author).is_ok());
+        assert!(!db.database_uuid.is_empty());
+        assert!(uuid::Uuid::parse_str(&db.database_uuid).is_ok());
 
         Ok(())
     }

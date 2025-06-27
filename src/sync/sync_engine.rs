@@ -84,10 +84,10 @@ impl SyncEngine {
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
-        log::info!("Starting sync for author {}", db.get_author());
+        log::info!("Starting sync for author {}", db.get_database_uuid());
 
         // 1. Pull changes from other authors
-        let remote_changes = self.pull_remote_changes(db.get_author(), db)?;
+        let remote_changes = self.pull_remote_changes(db.get_database_uuid(), db)?;
 
         // 2. Apply remote changes to local database
         self.apply_remote_changes(db, &remote_changes)?;
@@ -286,7 +286,7 @@ impl SyncEngine {
     }
 
     fn push_new_changes(&self, db: &Db) -> Result<()> {
-        let author = db.get_author();
+        let author = db.get_database_uuid();
 
         // Get the UUID of the latest pushed change for this author
         let latest_pushed_uuid = self.get_latest_pushed_uuid(author)?;
@@ -382,7 +382,7 @@ mod tests {
         sync.sync(&db)?;
 
         // Verify changes were pushed to storage
-        let author_prefix = format!("authors/{}/", db.get_author());
+        let author_prefix = format!("authors/{}/", db.get_database_uuid());
         let files = sync.target.list(&author_prefix)?;
         assert!(!files.is_empty());
 
@@ -391,7 +391,7 @@ mod tests {
         let file_content = String::from_utf8(file_content_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
         let bundle: ChangeBundle = serde_json::from_str(&file_content)?;
-        assert_eq!(bundle.author, db.get_author());
+        assert_eq!(bundle.author, db.get_database_uuid());
         assert_eq!(bundle.changes.len(), 1);
         assert_eq!(bundle.changes[0].entity_type, "TestEntity");
         assert_eq!(bundle.changes[0].entity_key, saved_entity.key);
