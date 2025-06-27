@@ -1,4 +1,4 @@
-use dimple_data::Db;
+use dimple_db::Db;
 use include_dir::{include_dir, Dir};
 use rusqlite_migration::Migrations;
 

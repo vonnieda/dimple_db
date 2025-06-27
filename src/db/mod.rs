@@ -5,5 +5,5 @@ pub use core::Db;
 pub mod types;
 pub mod core;
 pub mod query;
-pub mod changes;
+pub mod history;
 pub mod reactive;

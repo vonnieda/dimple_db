@@ -1,4 +1,4 @@
-use dimple_data::db::{Db, QueryResult};
+use dimple_db::db::{Db, QueryResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]

@@ -396,7 +396,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dimple_data"
+name = "dimple_db"
 version = "0.1.0"
 dependencies = [
  "age",

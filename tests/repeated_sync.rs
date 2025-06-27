@@ -1,5 +1,5 @@
-use dimple_data::db::Db;
-use dimple_data::sync::{SyncTarget, SyncEngine, SyncConfig};
+use dimple_db::db::Db;
+use dimple_db::sync::{SyncTarget, SyncEngine, SyncConfig};
 use serde::{Deserialize, Serialize};
 
 #[test]
@@ -28,7 +28,7 @@ fn test_repeated_sync_no_bloat() -> anyhow::Result<()> {
 
     // Set up sync with shared storage
     let sync_config = SyncConfig::default();
-    let shared_storage = dimple_data::sync::InMemoryStorage::new();
+    let shared_storage = dimple_db::sync::InMemoryStorage::new();
 
     let alice_sync = SyncEngine {
         config: sync_config.clone(),
@@ -260,7 +260,7 @@ impl Default for TestItem {
 }
 
 // Helper function to count files in storage
-fn count_storage_files(storage: &dimple_data::sync::InMemoryStorage) -> usize {
+fn count_storage_files(storage: &dimple_db::sync::InMemoryStorage) -> usize {
     // Since we can't directly access the internal HashMap, we'll use list operation
     match storage.list("") {
         Ok(files) => files.len(),

@@ -5,10 +5,10 @@ use super::types::Entity;
 
 impl Db {
     // TODO change this to return an object that will either allow getting
-    // the results as a vec or subscribing to get them as with observe_query,
+    // the results as a vec or observing them with observe_query,
     // like this:
     // let artists: Vec<Artist> = db.query("SELECT * FROM Artist").to_vec();
-    // let query = db.query("SELECT * FROM Artist").subscribe(|artists: Vec<Artist>| dbg!(artists));
+    // let query = db.query("SELECT * FROM Artist").observe(|artists: Vec<Artist>| dbg!(artists));
     // // callback is called whenever Artists change
     // drop(query); to cancel the subscription
     pub fn query<T: Entity>(

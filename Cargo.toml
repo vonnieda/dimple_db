@@ -1,11 +1,11 @@
 [package]
-name = "dimple_data"
+name = "dimple_db"
 version = "0.1.0"
 edition = "2021"
 description = "Reactive data store with S3 compatible synchronization based on SQLite"
 license = "MIT"
-repository = "https://github.com/vonnieda/dimple_data"
-homepage = "https://github.com/vonnieda/dimple_data"
+repository = "https://github.com/vonnieda/dimple_db"
+homepage = "https://github.com/vonnieda/dimple_db"
 keywords = ["database", "sqlite", "sync", "s3", "reactive", "localfirst"]
 categories = ["database-implementations"]
 

@@ -20,25 +20,18 @@ pub struct Db {
 
 impl Db {
     pub fn open_memory() -> anyhow::Result<Self> {
-        let conn = Arc::new(RwLock::new(Connection::open_in_memory()?));
-        let db = Db {
-            conn,
-            database_uuid: "".to_string(), // Will be set after initialization
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            query_notifier: Arc::new(Notifier::new()),
-        };
-        db.init_connection()?;
-        db.init_change_tracking_tables()?;
-        let database_uuid = db.get_or_create_database_uuid()?;
-        let mut db = db;
-        db.database_uuid = database_uuid;
-        Ok(db)
+        let conn = Connection::open_in_memory()?;
+        Self::from_connection(conn)
     }
 
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> anyhow::Result<Self> {
-        let conn = Arc::new(RwLock::new(Connection::open(path)?));
+        let conn = Connection::open(path)?;
+        Self::from_connection(conn)
+    }
+
+    fn from_connection(conn: Connection) -> anyhow::Result<Self> {
         let db = Db {
-            conn,
+            conn: Arc::new(RwLock::new(conn)),
             database_uuid: "".to_string(), // Will be set after initialization
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             query_notifier: Arc::new(Notifier::new()),
@@ -46,6 +39,8 @@ impl Db {
         db.init_connection()?;
         db.init_change_tracking_tables()?;
         let database_uuid = db.get_or_create_database_uuid()?;
+        
+        // Update the database UUID
         let mut db = db;
         db.database_uuid = database_uuid;
         Ok(db)
@@ -104,35 +99,24 @@ impl Db {
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
 
-        // Use a transaction to ensure atomicity
         let tx = conn.transaction()?;
+        
+        // Try insert with a new UUID - will fail silently if key already exists
+        let new_uuid = Uuid::now_v7().to_string();
+        let _ = tx.execute(
+            "INSERT OR IGNORE INTO _metadata (key, value) VALUES ('database_uuid', ?)",
+            [&new_uuid],
+        );
 
-        // Try to get existing UUID
-        let existing_uuid = tx.query_row(
+        // Now get the UUID (either the existing one or the one we just inserted)
+        let uuid = tx.query_row(
             "SELECT value FROM _metadata WHERE key = 'database_uuid'",
             [],
             |row| row.get::<_, String>(0),
-        );
+        )?;
 
-        match existing_uuid {
-            Ok(uuid) => {
-                tx.commit()?;
-                Ok(uuid)
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // Create new UUID and store it
-                let new_uuid = Uuid::now_v7().to_string();
-
-                tx.execute(
-                    "INSERT INTO _metadata (key, value) VALUES ('database_uuid', ?)",
-                    [&new_uuid],
-                )?;
-
-                tx.commit()?;
-                Ok(new_uuid)
-            }
-            Err(e) => Err(e.into()),
-        }
+        tx.commit()?;
+        Ok(uuid)
     }
 
     pub fn migrate_sql(&self, migration_sqls: &[&str]) -> anyhow::Result<()> {
@@ -226,7 +210,7 @@ impl Db {
         let full_name = std::any::type_name::<T>();
 
         // Extract just the struct name from the full path
-        // e.g. "dimple_data::db::tests::Artist" -> "Artist"
+        // e.g. "dimple_db::db::tests::Artist" -> "Artist"
         let name = full_name.split("::").last().unwrap_or(full_name);
 
         Ok(name.to_string())
