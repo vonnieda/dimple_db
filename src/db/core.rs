@@ -52,6 +52,25 @@ impl Db {
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for connection init"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        
+        // Register custom uuid7() function
+        self.register_uuid7_function(&conn)?;
+        
+        Ok(())
+    }
+
+    fn register_uuid7_function(&self, conn: &Connection) -> anyhow::Result<()> {
+        use rusqlite::functions::FunctionFlags;
+        
+        conn.create_scalar_function(
+            "uuid7",
+            0, // No parameters
+            FunctionFlags::SQLITE_UTF8,
+            |_ctx| {
+                Ok(uuid::Uuid::now_v7().to_string())
+            },
+        )?;
+        
         Ok(())
     }
 
