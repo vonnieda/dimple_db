@@ -5,7 +5,6 @@ use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations};
 use uuid::Uuid;
 
-use crate::db::ChangeType;
 use crate::notifier::Notifier;
 use crate::Entity;
 use super::types::QuerySubscription;
@@ -70,22 +69,20 @@ impl Db {
             CREATE TABLE IF NOT EXISTS _transaction (
                 id TEXT NOT NULL PRIMARY KEY,
                 timestamp INTEGER NOT NULL,
-                author TEXT NOT NULL,
-                bundle_id TEXT
+                author TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS _change (
-                id TEXT NOT NULL PRIMARY KEY,
                 transaction_id TEXT NOT NULL,
                 entity_type TEXT NOT NULL,
                 entity_key TEXT NOT NULL,
-                change_type TEXT NOT NULL,
-                old_values TEXT,
-                new_values TEXT,
+                attribute TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                PRIMARY KEY (transaction_id, entity_type, entity_key, attribute),
                 FOREIGN KEY (transaction_id) REFERENCES _transaction(id)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_change_transaction_id ON _change(transaction_id);
             CREATE INDEX IF NOT EXISTS idx_change_entity ON _change(entity_type, entity_key);
             CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON _transaction(timestamp);
         ",
@@ -150,7 +147,7 @@ impl Db {
     }
 
     pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
-        let table_name = self.struct_name(entity)?;
+        let table_name = self.type_name::<T>();
 
         let mut entity_json = serde_json::to_value(entity)?;
         self.ensure_entity_has_key(&mut entity_json)?;
@@ -168,29 +165,27 @@ impl Db {
         let exists = self.record_exists(&tx, &table_name, &key_value)?;
 
         // Capture old values for change tracking
-        let old_values = if exists {
-            Some(self.get_record_as_json(&tx, &table_name, &key_value)?)
+        let old_entity = if exists {
+            let old_entity: T = self.get(&tx, &table_name, &key_value)?;
+            Some(serde_json::to_value(old_entity)?)
         } else {
             None
         };
 
-        let change_type = if exists {
+        // Perform the database operation
+        if exists {
             self.update_record(&tx, &table_name, &key_value, all_params, &table_columns)?;
-            ChangeType::Update
         } else {
             self.insert_record(&tx, &table_name, all_params, &table_columns)?;
-            ChangeType::Insert
-        };
+        }
 
-        // Record change
-        let new_values = serde_json::to_string(&entity_json)?;
-        self.record_change(
+        // Record attribute-level changes
+        self.record_changes(
             &tx,
             &table_name,
             &key_value,
-            change_type,
-            old_values,
-            Some(new_values),
+            old_entity.as_ref(),
+            Some(&entity_json),
         )?;
 
         tx.commit()?;
@@ -206,14 +201,10 @@ impl Db {
         Ok(final_entity)
     }
 
-    pub(crate) fn struct_name<T>(&self, _value: &T) -> anyhow::Result<String> {
+    pub(crate) fn type_name<T>(&self) -> String {
         let full_name = std::any::type_name::<T>();
-
         // Extract just the struct name from the full path
-        // e.g. "dimple_db::db::tests::Artist" -> "Artist"
-        let name = full_name.split("::").last().unwrap_or(full_name);
-
-        Ok(name.to_string())
+        full_name.split("::").last().unwrap_or(full_name).to_string()
     }
 
     pub(crate) fn get_table_columns(
@@ -280,20 +271,37 @@ impl Db {
             .ok_or_else(|| anyhow::anyhow!("Entity missing required 'key' field"))
     }
 
-    pub(crate) fn get_record_as_json(
+    pub(crate) fn get<T: Entity>(
         &self,
         tx: &rusqlite::Transaction,
         table_name: &str,
         key: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<T> {
         let sql = format!("SELECT * FROM {} WHERE key = ?", table_name);
         let mut stmt = tx.prepare(&sql)?;
         let mut rows = stmt.query([key])?;
 
         if let Some(row) = rows.next()? {
-            // Use serde_rusqlite to convert row to JSON Value, then to string
-            let json_value: serde_json::Value = serde_rusqlite::from_row(row)?;
-            Ok(serde_json::to_string(&json_value)?)
+            let entity: T = serde_rusqlite::from_row(row)?;
+            Ok(entity)
+        } else {
+            Err(anyhow::anyhow!("Record with key '{}' not found in table '{}'", key, table_name))
+        }
+    }
+
+    pub(crate) fn get_as_value(
+        &self,
+        tx: &rusqlite::Transaction,
+        table_name: &str,
+        key: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let sql = format!("SELECT * FROM {} WHERE key = ?", table_name);
+        let mut stmt = tx.prepare(&sql)?;
+        let mut rows = stmt.query([key])?;
+
+        if let Some(row) = rows.next()? {
+            let map: std::collections::HashMap<String, serde_json::Value> = serde_rusqlite::from_row(row)?;
+            Ok(serde_json::Value::Object(map.into_iter().collect()))
         } else {
             Err(anyhow::anyhow!("Record not found"))
         }
@@ -434,9 +442,9 @@ mod tests {
             ..Default::default()
         })?;
 
-        // Query changes - should have 1 since tracking is always enabled
+        // Query changes - should have 2 (key + name) since tracking is always enabled
         let changes = db.get_changes_for_entity("Artist", &artist.key)?;
-        assert_eq!(changes.len(), 1);
+        assert_eq!(changes.len(), 2);
 
         // Check that author is a valid UUID
         assert!(!db.database_uuid.is_empty());

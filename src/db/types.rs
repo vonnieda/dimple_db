@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Receiver;
 use std::sync::{RwLock, Weak};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -9,30 +8,22 @@ pub trait Entity: Serialize + DeserializeOwned {}
 // Blanket implementation for any type that meets the requirements
 impl<T> Entity for T where T: Serialize + DeserializeOwned {}
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ChangeType {
-    Insert,
-    Update,
-    Delete,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: String,
     pub timestamp: i64,
     pub author: String,
-    pub bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Change {
-    pub id: String,
     pub transaction_id: String,
     pub entity_type: String,
     pub entity_key: String,
-    pub change_type: String,
-    pub old_values: Option<String>,
-    pub new_values: Option<String>,
+    pub attribute: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -232,9 +232,9 @@ impl SyncEngine {
             changes: changes.to_vec(),
         };
 
-        // Generate filename based on latest change UUID
+        // Generate filename based on latest change transaction ID
         let latest_change_id = if let Some(last_change) = changes.last() {
-            &last_change.id
+            &last_change.transaction_id
         } else {
             return Ok(()); // No changes to push
         };
@@ -392,9 +392,12 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("Failed to decode UTF-8: {}", e))?;
         let bundle: ChangeBundle = serde_json::from_str(&file_content)?;
         assert_eq!(bundle.author, db.get_database_uuid());
-        assert_eq!(bundle.changes.len(), 1);
-        assert_eq!(bundle.changes[0].entity_type, "TestEntity");
-        assert_eq!(bundle.changes[0].entity_key, saved_entity.key);
+        assert_eq!(bundle.changes.len(), 3); // key, name, value attributes
+        // Verify all changes are for the same entity
+        for change in &bundle.changes {
+            assert_eq!(change.entity_type, "TestEntity");
+            assert_eq!(change.entity_key, saved_entity.key);
+        }
 
         Ok(())
     }

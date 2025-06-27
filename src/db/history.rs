@@ -1,18 +1,24 @@
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::core::Db;
-use super::types::{Entity, ChangeType, Change, Transaction};
+use super::types::{Change, Transaction};
 
 impl Db {
-    pub (crate) fn record_change(
+    pub(crate) fn record_changes(
         &self,
         tx: &rusqlite::Transaction,
         entity_type: &str,
         entity_key: &str,
-        change_type: ChangeType,
-        old_values: Option<String>,
-        new_values: Option<String>,
+        old_entity: Option<&Value>,
+        new_entity: Option<&Value>,
     ) -> anyhow::Result<()> {
+        let changes = Self::diff_entities(old_entity, new_entity);
+        
+        if changes.is_empty() {
+            return Ok(()); // No changes to record
+        }
+
         // Create transaction record
         let transaction_id = Uuid::now_v7().to_string();
         let timestamp = std::time::SystemTime::now()
@@ -20,50 +26,107 @@ impl Db {
             .as_millis() as i64;
 
         log::debug!(
-            "SQL EXECUTE: INSERT INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)"
+            "SQL EXECUTE: INSERT INTO _transaction (id, timestamp, author) VALUES (?, ?, ?)"
         );
         let tx_affected = tx.execute(
-            "INSERT INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO _transaction (id, timestamp, author) VALUES (?, ?, ?)",
             rusqlite::params![
                 transaction_id,
                 timestamp,
                 self.database_uuid,
-                Option::<String>::None
             ],
         )?;
         log::debug!("SQL EXECUTE RESULT: {} rows affected", tx_affected);
 
-        // Create change record
-        let change_id = Uuid::now_v7().to_string();
-        let change_type_str = match change_type {
-            ChangeType::Insert => "Insert",
-            ChangeType::Update => "Update",
-            ChangeType::Delete => "Delete",
-        };
-
-        log::debug!(
-            "SQL EXECUTE: INSERT INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        );
-        let ch_affected = tx.execute(
-            "INSERT INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                change_id,
-                transaction_id,
-                entity_type,
-                entity_key,
-                change_type_str,
-                old_values,
-                new_values,
-            ],
-        )?;
-        log::debug!("SQL EXECUTE RESULT: {} rows affected", ch_affected);
+        // Insert change records for each attribute
+        for (attribute, old_value, new_value) in changes {
+            log::debug!(
+                "SQL EXECUTE: INSERT INTO _change (transaction_id, entity_type, entity_key, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)"
+            );
+            let ch_affected = tx.execute(
+                "INSERT INTO _change (transaction_id, entity_type, entity_key, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    transaction_id,
+                    entity_type,
+                    entity_key,
+                    attribute,
+                    old_value,
+                    new_value,
+                ],
+            )?;
+            log::debug!("SQL EXECUTE RESULT: {} rows affected", ch_affected);
+        }
 
         Ok(())
     }
 
+    fn diff_entities(
+        old_entity: Option<&Value>,
+        new_entity: Option<&Value>,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let mut changes = Vec::new();
+        
+        match (old_entity, new_entity) {
+            (None, None) => {}, // No change
+            (None, Some(new)) => {
+                // Entity creation - record non-null attributes
+                if let Some(obj) = new.as_object() {
+                    for (key, value) in obj {
+                        // Skip null values during entity creation
+                        if !value.is_null() {
+                            changes.push((
+                                key.clone(),
+                                None,
+                                Some(value.to_string()),
+                            ));
+                        }
+                    }
+                }
+            },
+            (Some(_old), None) => {
+                // Entity deletion - all attributes are removed
+                if let Some(obj) = old_entity.unwrap().as_object() {
+                    for (key, value) in obj {
+                        changes.push((
+                            key.clone(),
+                            Some(value.to_string()),
+                            None,
+                        ));
+                    }
+                }
+            },
+            (Some(old), Some(new)) => {
+                // Entity update - find changed attributes
+                let empty_map = serde_json::Map::new();
+                let old_obj = old.as_object().unwrap_or(&empty_map);
+                let new_obj = new.as_object().unwrap_or(&empty_map);
+                
+                // Find all attributes in either old or new
+                let mut all_keys = std::collections::HashSet::new();
+                all_keys.extend(old_obj.keys());
+                all_keys.extend(new_obj.keys());
+                
+                for key in all_keys {
+                    let old_val = old_obj.get(key);
+                    let new_val = new_obj.get(key);
+                    
+                    if old_val != new_val {
+                        changes.push((
+                            key.clone(),
+                            old_val.map(|v| v.to_string()),
+                            new_val.map(|v| v.to_string()),
+                        ));
+                    }
+                }
+            },
+        }
+        
+        changes
+    }
+
     pub fn get_changes_since_uuid(&self, since_uuid: &str) -> anyhow::Result<Vec<Change>> {
         self.query(
-            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
+            "SELECT c.transaction_id, c.entity_type, c.entity_key, c.attribute, c.old_value, c.new_value
              FROM _change c 
              JOIN _transaction t ON c.transaction_id = t.id 
              WHERE t.id > ? 
@@ -78,7 +141,7 @@ impl Db {
         entity_key: &str,
     ) -> anyhow::Result<Vec<Change>> {
         self.query(
-            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
+            "SELECT c.transaction_id, c.entity_type, c.entity_key, c.attribute, c.old_value, c.new_value
              FROM _change c 
              JOIN _transaction t ON c.transaction_id = t.id 
              WHERE c.entity_type = ? AND c.entity_key = ? 
@@ -89,7 +152,7 @@ impl Db {
 
     pub fn get_all_changes(&self) -> anyhow::Result<Vec<Change>> {
         self.query(
-            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
+            "SELECT c.transaction_id, c.entity_type, c.entity_key, c.attribute, c.old_value, c.new_value
              FROM _change c 
              JOIN _transaction t ON c.transaction_id = t.id 
              ORDER BY t.timestamp ASC",
@@ -155,7 +218,6 @@ impl Db {
                     id: change.transaction_id.clone(),
                     timestamp,
                     author: remote_author.to_string(), // Preserve original author
-                    bundle_id: None,
                 };
                 transactions_to_insert.insert(change.transaction_id.clone(), transaction);
                 changes_to_apply.push(change);
@@ -165,48 +227,36 @@ impl Db {
         // Insert new transactions
         for (_, transaction) in transactions_to_insert {
             log::debug!(
-                "SQL EXECUTE: INSERT OR IGNORE INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)"
+                "SQL EXECUTE: INSERT OR IGNORE INTO _transaction (id, timestamp, author) VALUES (?, ?, ?)"
             );
             let affected_rows = tx.execute(
-                "INSERT OR IGNORE INTO _transaction (id, timestamp, author, bundle_id) VALUES (?, ?, ?, ?)",
-                rusqlite::params![transaction.id, transaction.timestamp, transaction.author, transaction.bundle_id],
+                "INSERT OR IGNORE INTO _transaction (id, timestamp, author) VALUES (?, ?, ?)",
+                rusqlite::params![transaction.id, transaction.timestamp, transaction.author],
             )?;
             log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
         }
 
-        // Insert change records and apply entity changes
-        for change in changes_to_apply {
-            // Insert the change record (preserve original change ID and transaction ID)
+        // Insert change records
+        for change in &changes_to_apply {
             log::debug!(
-                "SQL EXECUTE: INSERT OR IGNORE INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "SQL EXECUTE: INSERT OR IGNORE INTO _change (transaction_id, entity_type, entity_key, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)"
             );
             let affected_rows = tx.execute(
-                "INSERT OR IGNORE INTO _change (id, transaction_id, entity_type, entity_key, change_type, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO _change (transaction_id, entity_type, entity_key, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
-                    change.id,
                     change.transaction_id,
                     change.entity_type,
                     change.entity_key,
-                    change.change_type,
-                    change.old_values,
-                    change.new_values,
+                    change.attribute,
+                    change.old_value,
+                    change.new_value,
                 ],
             )?;
             log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
-
-            // Apply the entity change
-            match change.change_type.as_str() {
-                "Insert" => self.apply_insert_change(&tx, change)?,
-                "Update" => self.apply_update_change(&tx, change)?,
-                "Delete" => self.apply_delete_change(&tx, change)?,
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Unknown change type: {}",
-                        change.change_type
-                    ));
-                }
-            }
         }
+
+        // Apply entity changes by reconstructing entities from attribute changes
+        self.apply_attribute_changes(&tx, &changes_to_apply)?;
 
         tx.commit()?;
         Ok(())
@@ -218,7 +268,7 @@ impl Db {
         transaction_id: &str,
     ) -> anyhow::Result<Transaction> {
         let mut stmt =
-            conn.prepare("SELECT id, timestamp, author, bundle_id FROM _transaction WHERE id = ?")?;
+            conn.prepare("SELECT id, timestamp, author FROM _transaction WHERE id = ?")?;
         let mut rows = stmt.query([transaction_id])?;
 
         if let Some(row) = rows.next()? {
@@ -226,93 +276,93 @@ impl Db {
                 id: row.get(0)?,
                 timestamp: row.get(1)?,
                 author: row.get(2)?,
-                bundle_id: row.get(3)?,
             })
         } else {
             Err(anyhow::anyhow!("Transaction not found: {}", transaction_id))
         }
     }
 
-    fn apply_insert_change(
+    fn apply_attribute_changes(
         &self,
         tx: &rusqlite::Transaction,
-        change: &Change,
+        changes: &[&Change],
     ) -> anyhow::Result<()> {
-        if let Some(new_values) = &change.new_values {
-            let entity_json: serde_json::Value = serde_json::from_str(new_values)?;
-
-            // Check if the record already exists
-            if self.record_exists(tx, &change.entity_type, &change.entity_key)? {
-                // Record exists, this might be a conflict. For now, skip it.
-                log::warn!(
-                    "Insert conflict: {} {} already exists, skipping",
-                    change.entity_type,
-                    change.entity_key
-                );
-                return Ok(());
-            }
-
-            // Insert the record
-            let table_columns = self.get_table_columns(tx, &change.entity_type)?;
-            let all_params = serde_rusqlite::to_params_named(&entity_json)?;
-            self.insert_record(tx, &change.entity_type, all_params, &table_columns)?;
+        // Group changes by entity (type + key)
+        let mut entities: std::collections::HashMap<(String, String), Vec<&Change>> = std::collections::HashMap::new();
+        
+        for change in changes {
+            let entity_key = (change.entity_type.clone(), change.entity_key.clone());
+            entities.entry(entity_key).or_default().push(change);
         }
+        
+        // Process each entity
+        for ((entity_type, entity_key), entity_changes) in entities {
+            // Get current entity state from database
+            let current_entity = if self.record_exists(tx, &entity_type, &entity_key)? {
+                Some(self.get_as_value(tx, &entity_type, &entity_key)?)
+            } else {
+                None
+            };
+            
+            // Sort changes by transaction ID (UUIDv7 provides chronological ordering)
+            let mut sorted_changes = entity_changes;
+            sorted_changes.sort_by(|a, b| a.transaction_id.cmp(&b.transaction_id));
+            
+            // Apply changes to reconstruct entity
+            let final_entity = self.reconstruct_entity_from_changes(current_entity, &sorted_changes)?;
+            
+            // Save the reconstructed entity
+            match final_entity {
+                Some(entity_json) => {
+                    let table_columns = self.get_table_columns(tx, &entity_type)?;
+                    let all_params = serde_rusqlite::to_params_named(&entity_json)?;
+                    
+                    if self.record_exists(tx, &entity_type, &entity_key)? {
+                        self.update_record(tx, &entity_type, &entity_key, all_params, &table_columns)?;
+                    } else {
+                        self.insert_record(tx, &entity_type, all_params, &table_columns)?;
+                    }
+                }
+                None => {
+                    // Entity should be deleted
+                    if self.record_exists(tx, &entity_type, &entity_key)? {
+                        let sql = format!("DELETE FROM {} WHERE key = ?", entity_type);
+                        tx.execute(&sql, [&entity_key])?;
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
-
-    fn apply_update_change(
+    
+    fn reconstruct_entity_from_changes(
         &self,
-        tx: &rusqlite::Transaction,
-        change: &Change,
-    ) -> anyhow::Result<()> {
-        if let Some(new_values) = &change.new_values {
-            let entity_json: serde_json::Value = serde_json::from_str(new_values)?;
-
-            // Check if the record exists
-            if !self.record_exists(tx, &change.entity_type, &change.entity_key)? {
-                // Record doesn't exist, treat as insert
-                log::warn!(
-                    "Update target missing: {} {}, treating as insert",
-                    change.entity_type,
-                    change.entity_key
-                );
-                return self.apply_insert_change(tx, change);
+        current_entity: Option<Value>,
+        changes: &[&Change],
+    ) -> anyhow::Result<Option<Value>> {
+        // Start with current state or empty object
+        let mut entity = current_entity.unwrap_or_else(|| serde_json::json!({}));
+        
+        for change in changes {
+            if let Some(new_value) = &change.new_value {
+                // Set attribute
+                let parsed_value: Value = serde_json::from_str(new_value)?;
+                entity[&change.attribute] = parsed_value;
+            } else {
+                // Remove attribute
+                if let Some(obj) = entity.as_object_mut() {
+                    obj.remove(&change.attribute);
+                }
             }
-
-            // Update the record
-            let table_columns = self.get_table_columns(tx, &change.entity_type)?;
-            let all_params = serde_rusqlite::to_params_named(&entity_json)?;
-            self.update_record(
-                tx,
-                &change.entity_type,
-                &change.entity_key,
-                all_params,
-                &table_columns,
-            )?;
         }
-        Ok(())
-    }
-
-    fn apply_delete_change(
-        &self,
-        tx: &rusqlite::Transaction,
-        change: &Change,
-    ) -> anyhow::Result<()> {
-        // Check if the record exists
-        if !self.record_exists(tx, &change.entity_type, &change.entity_key)? {
-            // Record doesn't exist, nothing to delete
-            log::warn!(
-                "Delete target missing: {} {}, skipping",
-                change.entity_type,
-                change.entity_key
-            );
-            return Ok(());
+        
+        // Return None if entity is empty (deleted)
+        if entity.as_object().map_or(true, |obj| obj.is_empty()) {
+            Ok(None)
+        } else {
+            Ok(Some(entity))
         }
-
-        // Delete the record
-        let sql = format!("DELETE FROM {} WHERE key = ?", change.entity_type);
-        tx.execute(&sql, [&change.entity_key])?;
-        Ok(())
     }
 
 
@@ -559,23 +609,24 @@ mod tests {
             )?;
         }
 
-        // Save a new artist - should create Insert change
+        // Save a new artist - should create attribute changes
         let artist = db.save(&Artist {
             name: "Metallica".to_string(),
             disambiguation: Some("American metal band".to_string()),
             ..Default::default()
         })?;
 
-        // Query changes
+        // Query changes - should have one change per attribute
         let changes = db.get_changes_for_entity("Artist", &artist.key)?;
-        assert_eq!(changes.len(), 1);
+        assert_eq!(changes.len(), 3); // key, name, disambiguation
 
-        let change = &changes[0];
-        assert_eq!(change.entity_type, "Artist");
-        assert_eq!(change.entity_key, artist.key);
-        assert_eq!(change.change_type, "Insert");
-        assert!(change.old_values.is_none());
-        assert!(change.new_values.is_some());
+        // Verify all changes are for this entity and have no old values (insert)
+        for change in &changes {
+            assert_eq!(change.entity_type, "Artist");
+            assert_eq!(change.entity_key, artist.key);
+            assert!(change.old_value.is_none());
+            assert!(change.new_value.is_some());
+        }
 
         Ok(())
     }
@@ -604,7 +655,7 @@ mod tests {
             ..Default::default()
         })?;
 
-        // Update the artist - should create Update change
+        // Update only the disambiguation field
         let _artist2 = db.save(&Artist {
             key: artist1.key.clone(),
             name: "Iron Maiden".to_string(),
@@ -613,24 +664,27 @@ mod tests {
 
         // Query changes for this entity
         let changes = db.get_changes_for_entity("Artist", &artist1.key)?;
-        assert_eq!(changes.len(), 2); // Insert + Update
-
-        // Check Insert change
-        let insert_change = &changes[0];
-        assert_eq!(insert_change.change_type, "Insert");
-        assert!(insert_change.old_values.is_none());
-
-        // Check Update change
-        let update_change = &changes[1];
-        assert_eq!(update_change.change_type, "Update");
-        assert!(update_change.old_values.is_some());
-        assert!(update_change.new_values.is_some());
+        
+        // Find the disambiguation changes
+        let disambiguation_changes: Vec<_> = changes
+            .iter()
+            .filter(|c| c.attribute == "disambiguation")
+            .collect();
+        
+        assert_eq!(disambiguation_changes.len(), 2); // Original + update
+        
+        // Verify the update has both old and new values
+        let update_change = &disambiguation_changes[1];
+        assert!(update_change.old_value.is_some());
+        assert!(update_change.new_value.is_some());
+        assert!(update_change.old_value.as_ref().unwrap().contains("British metal band"));
+        assert!(update_change.new_value.as_ref().unwrap().contains("British heavy metal band"));
 
         Ok(())
     }
 
     #[test]
-    fn test_save_performance_comparison() -> anyhow::Result<()> {
+    fn test_save_with_change_tracking() -> anyhow::Result<()> {
         let db = crate::Db::open_memory()?;
 
         // Create test table
@@ -642,67 +696,36 @@ mod tests {
                     name           TEXT NOT NULL,
                     disambiguation TEXT
                 );
-                
-                CREATE TABLE Artist_Raw (
-                    key            TEXT NOT NULL PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    disambiguation TEXT
-                );
             ",
             )?;
         }
 
-        let artist = Artist {
-            name: "Test Artist".to_string(),
-            disambiguation: Some("Test Band".to_string()),
-            ..Default::default()
-        };
+        let iterations = 100;
 
-        let iterations = 1000;
-
-        // Test our optimized save() function
-        let start = std::time::Instant::now();
+        // Test our save() function with change tracking
         for i in 0..iterations {
-            let mut test_artist = artist.clone();
-            test_artist.name = format!("Test Artist {}", i);
+            let test_artist = Artist {
+                name: format!("Test Artist {}", i),
+                disambiguation: Some("Test Band".to_string()),
+                ..Default::default()
+            };
             db.save(&test_artist)?;
         }
-        let optimized_duration = start.elapsed();
-
-        // Test raw SQLite insert (no change tracking, no transactions)
-        let start = std::time::Instant::now();
-        {
-            let conn = db.conn.write().unwrap();
-            for i in 0..iterations {
-                let key = uuid::Uuid::now_v7().to_string();
-                let name = format!("Raw Artist {}", i);
-                conn.execute(
-                    "INSERT INTO Artist_Raw (key, name, disambiguation) VALUES (?, ?, ?)",
-                    rusqlite::params![key, name, "Raw Band"],
-                )?;
-            }
-        }
-        let raw_duration = start.elapsed();
-
-        println!("Optimized save(): {:?}", optimized_duration);
-        println!("Raw SQLite insert: {:?}", raw_duration);
-        println!(
-            "Overhead ratio: {:.2}x",
-            optimized_duration.as_secs_f64() / raw_duration.as_secs_f64()
-        );
 
         // Verify we have the expected number of records
-        let optimized_count: i64 = {
+        let count: i64 = {
             let conn = db.conn.read().unwrap();
             conn.query_row("SELECT COUNT(*) FROM Artist", [], |row| row.get(0))?
         };
-        let raw_count: i64 = {
-            let conn = db.conn.read().unwrap();
-            conn.query_row("SELECT COUNT(*) FROM Artist_Raw", [], |row| row.get(0))?
-        };
+        assert_eq!(count, iterations as i64);
 
-        assert_eq!(optimized_count, iterations as i64);
-        assert_eq!(raw_count, iterations as i64);
+        // Verify change tracking is working
+        let total_changes: i64 = {
+            let conn = db.conn.read().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM _change", [], |row| row.get(0))?
+        };
+        // Each artist has 3 attributes (key, name, disambiguation), so 3 changes per artist
+        assert_eq!(total_changes, (iterations * 3) as i64);
 
         Ok(())
     }
