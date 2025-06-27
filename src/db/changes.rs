@@ -7,9 +7,8 @@ impl Db {
     pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
         let table_name = self.struct_name(entity)?;
 
-        // Convert to JSON once at the start
         let mut entity_json = serde_json::to_value(entity)?;
-        self.ensure_entity_has_key_json(&mut entity_json)?;
+        self.ensure_entity_has_key(&mut entity_json)?;
 
         let mut conn = self
             .conn
@@ -38,7 +37,7 @@ impl Db {
             ChangeType::Insert
         };
 
-        // Record change - reuse the JSON string
+        // Record change
         let new_values = serde_json::to_string(&entity_json)?;
         self.record_change(
             &tx,
@@ -119,17 +118,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_changes_since(&self, timestamp: i64) -> anyhow::Result<Vec<Change>> {
-        self.query(
-            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
-             FROM _change c 
-             JOIN _transaction t ON c.transaction_id = t.id 
-             WHERE t.timestamp > ? 
-             ORDER BY t.timestamp ASC",
-            &[&timestamp],
-        )
-    }
-
     pub fn get_changes_since_uuid(&self, since_uuid: &str) -> anyhow::Result<Vec<Change>> {
         self.query(
             "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
@@ -153,17 +141,6 @@ impl Db {
              WHERE c.entity_type = ? AND c.entity_key = ? 
              ORDER BY t.timestamp ASC",
             &[&entity_type, &entity_key],
-        )
-    }
-
-    pub fn get_changes_by_author(&self, author: &str) -> anyhow::Result<Vec<Change>> {
-        self.query(
-            "SELECT c.id, c.transaction_id, c.entity_type, c.entity_key, c.change_type, c.old_values, c.new_values 
-             FROM _change c 
-             JOIN _transaction t ON c.transaction_id = t.id 
-             WHERE t.author = ? 
-             ORDER BY t.timestamp ASC",
-            &[&author],
         )
     }
 
@@ -705,87 +682,6 @@ mod tests {
         assert_eq!(update_change.change_type, "Update");
         assert!(update_change.old_values.is_some());
         assert!(update_change.new_values.is_some());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_changes_since_timestamp() -> anyhow::Result<()> {
-        let db = crate::Db::open_memory()?;
-
-        // Create test table
-        if let Ok(conn) = db.conn.write() {
-            conn.execute_batch(
-                "
-                CREATE TABLE Artist (
-                    key            TEXT NOT NULL PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    disambiguation TEXT
-                );
-            ",
-            )?;
-        }
-
-        let start_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as i64
-            - 100; // Subtract 100ms to account for timing
-
-        // Save two artists
-        let _artist1 = db.save(&Artist {
-            name: "Metallica".to_string(),
-            ..Default::default()
-        })?;
-
-        let _artist2 = db.save(&Artist {
-            name: "Iron Maiden".to_string(),
-            ..Default::default()
-        })?;
-
-        // Get changes since start time
-        let changes = db.get_changes_since(start_time)?;
-        assert_eq!(changes.len(), 2);
-
-        // Get changes since now (should be empty)
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis() as i64;
-        let recent_changes = db.get_changes_since(now)?;
-        assert_eq!(recent_changes.len(), 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_changes_by_author() -> anyhow::Result<()> {
-        let db = crate::Db::open_memory()?;
-
-        // Create test table
-        if let Ok(conn) = db.conn.write() {
-            conn.execute_batch(
-                "
-                CREATE TABLE Artist (
-                    key            TEXT NOT NULL PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    disambiguation TEXT
-                );
-            ",
-            )?;
-        }
-
-        // Save an artist
-        let _artist = db.save(&Artist {
-            name: "Metallica".to_string(),
-            ..Default::default()
-        })?;
-
-        // Get changes by correct author (using the actual db author UUID)
-        let changes = db.get_changes_by_author(&db.author)?;
-        assert_eq!(changes.len(), 1);
-
-        // Get changes by different author (should be empty)
-        let other_changes = db.get_changes_by_author("other-author")?;
-        assert_eq!(other_changes.len(), 0);
 
         Ok(())
     }

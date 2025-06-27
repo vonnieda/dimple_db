@@ -238,7 +238,7 @@ impl Db {
         Ok(tx.prepare(&sql)?.exists([key])?)
     }
 
-    pub(crate) fn ensure_entity_has_key_json(
+    pub(crate) fn ensure_entity_has_key(
         &self,
         entity_json: &mut serde_json::Value,
     ) -> anyhow::Result<()> {
