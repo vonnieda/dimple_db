@@ -3,26 +3,28 @@
 DimpleDb is a reactive SQLite database wrapper for Rust that provides:
 
 - Plain SQL for queries, schemas, and migrations.
+- Simple table-to-struct mapping with serde.
 - Automatic change tracking and history.
 - Reactive queries with live updates.
 - Multi-author encrypted sync via any S3 compatible endpoint.
 
 DimpleDb is designed for storing and syncing user data across devices in
-local-first applications and is inspired by Apple's Core Data + CloudKit.
+local-first applications, and is inspired by Apple's Core Data + CloudKit.
 
 
 ## Sync Engine
 
 DimpleDb's sync engine is implemented as a distributed change log globally
-ordered by UUIDv7. It is designed to use simple storage with no API
+ordered by UUIDv7. It is designed to use simple file storage with no API
 requirements to avoid cloud vendor lock-in. 
 
 The primary target is S3 compatible storage. Connectors are also included for
 in memory and local file storage. Changes are pushed and pulled in simple JSON
-files, which are optionally encrypted with [age] passphrase encryption. 
+files, which are optionally encrypted with [age](https://github.com/FiloSottile/age)
+passphrase encryption. 
 
 Merge conflicts are automatically resolved last-write-wins at the attribute
-level using UUIDv7 which provides a global ordering.
+level.
 
 
 ## Inspiration and Research
