@@ -46,4 +46,4 @@ level.
 - [WatermelondDB: A reactive database framework](https://github.com/nozbe/WatermelonDB)
 - [Drift is a reactive persistence library for Flutter and Dart, built on top of SQLite](https://github.com/simolus3/drift)
 - [Electric SQL: Real-time sync for Postgres.](https://github.com/electric-sql/electric)
-
+- [LiveStore is a state management framework based on reactive SQLite and built-in sync engine.](https://livestore.dev/)
