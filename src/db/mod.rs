@@ -1,6 +1,6 @@
 // Re-export all public items from the db modules
 pub use types::*;
-pub use core::Db;
+pub use core::{Db, IntoMigrations};
 
 pub mod types;
 pub mod core;

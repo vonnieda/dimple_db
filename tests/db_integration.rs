@@ -24,7 +24,7 @@ fn quick_start() -> anyhow::Result<()> {
         "ALTER TABLE Artist ADD COLUMN disambiguation TEXT;",
     ];
 
-    db.migrate_sql(migrations)?;
+    db.migrate(migrations)?;
 
     // Track results from reactive query
     let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::<QueryResult<Artist>>::new()));

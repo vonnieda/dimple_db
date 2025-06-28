@@ -40,8 +40,8 @@ fn test_encrypted_sync_between_clients() -> Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate_sql(&[migration])?;
-    bob_db.migrate_sql(&[migration])?;
+    alice_db.migrate(&[migration])?;
+    bob_db.migrate(&[migration])?;
 
     // Create sync config with encryption passphrase
     let passphrase = "super-secret-passphrase-123!";
@@ -171,8 +171,8 @@ fn test_different_passphrases_cannot_decrypt() -> Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate_sql(&[migration])?;
-    mallory_db.migrate_sql(&[migration])?;
+    alice_db.migrate(&[migration])?;
+    mallory_db.migrate(&[migration])?;
 
     // Create sync configs with different passphrases
     let alice_passphrase = "alice-secret-key";

@@ -30,7 +30,6 @@ passphrase encryption.
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
 
-
 ## Inspiration and Research
 
 - [Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer)

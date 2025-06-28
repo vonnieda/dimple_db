@@ -9,6 +9,43 @@ use crate::notifier::Notifier;
 use crate::Entity;
 use super::types::QuerySubscription;
 
+/// Trait for types that can be converted into Migrations
+pub trait IntoMigrations {
+    fn into_migrations(self) -> Migrations<'static>;
+}
+
+impl IntoMigrations for Migrations<'static> {
+    fn into_migrations(self) -> Migrations<'static> {
+        self
+    }
+}
+
+impl IntoMigrations for &Migrations<'static> {
+    fn into_migrations(self) -> Migrations<'static> {
+        self.clone()
+    }
+}
+
+impl<const N: usize> IntoMigrations for &[&str; N] {
+    fn into_migrations(self) -> Migrations<'static> {
+        // Convert to owned strings to satisfy 'static lifetime requirement
+        let owned_sqls: Vec<String> = self.iter().map(|sql| sql.to_string()).collect();
+        let leaked_sqls: Vec<&'static str> = owned_sqls.into_iter().map(|s| Box::leak(s.into_boxed_str()) as &'static str).collect();
+        let migrations: Vec<M<'static>> = leaked_sqls.iter().map(|sql| M::up(sql)).collect();
+        Migrations::new(migrations)
+    }
+}
+
+impl IntoMigrations for &[&str] {
+    fn into_migrations(self) -> Migrations<'static> {
+        // Convert to owned strings to satisfy 'static lifetime requirement
+        let owned_sqls: Vec<String> = self.iter().map(|sql| sql.to_string()).collect();
+        let leaked_sqls: Vec<&'static str> = owned_sqls.into_iter().map(|s| Box::leak(s.into_boxed_str()) as &'static str).collect();
+        let migrations: Vec<M<'static>> = leaked_sqls.iter().map(|sql| M::up(sql)).collect();
+        Migrations::new(migrations)
+    }
+}
+
 #[derive(Clone)]
 pub struct Db {
     pub(crate) conn: Arc<RwLock<Connection>>,
@@ -135,27 +172,13 @@ impl Db {
         Ok(uuid)
     }
 
-    pub fn migrate_sql(&self, migration_sqls: &[&str]) -> anyhow::Result<()> {
+    pub fn migrate<T: IntoMigrations>(&self, migrations: T) -> anyhow::Result<()> {
         let mut conn = self
             .conn
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
 
-        // Convert string slices to M::up() migrations
-        let migrations: Vec<M> = migration_sqls.iter().map(|sql| M::up(sql)).collect();
-
-        let migrations = Migrations::new(migrations);
-        migrations.to_latest(&mut *conn)?;
-
-        Ok(())
-    }
-
-    pub fn migrate(&self, migrations: &Migrations) -> anyhow::Result<()> {
-        let mut conn = self
-            .conn
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
-
+        let migrations = migrations.into_migrations();
         migrations.to_latest(&mut *conn)?;
 
         Ok(())
@@ -497,7 +520,7 @@ mod tests {
         ];
 
         // Run migrations
-        db.migrate_sql(migrations)?;
+        db.migrate(migrations)?;
 
         // Verify tables were created
         let conn = db.conn.read().unwrap();
@@ -557,8 +580,8 @@ mod tests {
         ];
 
         // Run migrations twice - should not fail
-        db.migrate_sql(migrations)?;
-        db.migrate_sql(migrations)?;
+        db.migrate(migrations)?;
+        db.migrate(migrations)?;
 
         // Verify table structure is correct
         let conn = db.conn.read().unwrap();

@@ -23,8 +23,8 @@ fn test_repeated_sync_no_bloat() -> anyhow::Result<()> {
         value INTEGER NOT NULL
     );";
 
-    alice_db.migrate_sql(&[migration])?;
-    bob_db.migrate_sql(&[migration])?;
+    alice_db.migrate(&[migration])?;
+    bob_db.migrate(&[migration])?;
 
     // Set up sync with shared storage
     let sync_config = SyncConfig::default();
