@@ -1,4 +1,4 @@
 pub mod db;
-pub mod notifier;
 pub mod sync;
-pub use db::{Db, Entity, QueryResult};
+pub mod notifier;
+pub use db::{Db, Entity};

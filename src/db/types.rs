@@ -1,61 +1,42 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{RwLock, Weak};
-
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use rusqlite::Params;
+use serde::{Serialize, de::DeserializeOwned};
 
 pub trait Entity: Serialize + DeserializeOwned {}
 
 // Blanket implementation for any type that meets the requirements
 impl<T> Entity for T where T: Serialize + DeserializeOwned {}
 
+pub trait DbTransaction {
+    fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
+        // let table_name = self.type_name::<T>();
+        // create a transaction
+        // get the table's column names
+        // map the entity's fields to columns
+        // insert or update the value, creating a uuidv7 id if needed
+        // record the change in history tables
+        // notify listeners
+        todo!()
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transaction {
-    pub id: String,
-    pub timestamp: i64,
-    pub author: String,
-}
+    fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Vec<T>> {
+        // run the query, use serde_rusqlite to convert back to entities
+        todo!()
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Change {
-    pub transaction_id: String,
-    pub entity_type: String,
-    pub entity_key: String,
-    pub attribute: String,
-    pub old_value: Option<String>,
-    pub new_value: Option<String>,
-}
+    fn query_one<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Option<T>> {
+        // shortcut for query().first()
+        todo!()
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryResult<T> {
-    pub data: Vec<T>,
-    pub keys: HashSet<String>,
-    pub hash: u64,
-}
+    fn query_subscribe<T: Entity, P: Params, F: FnMut(Vec<T>) -> ()>(&self, sql: &str, params: P, cb: F) -> anyhow::Result<()> {
+        // run an explain query plan and extract names of tables that the query depends on
+        // and then when there are changes in any of those tables, re-run the query and
+        // call the callback with the results
+        todo!()
+    }
 
-#[derive(Debug, Clone)]
-pub struct QuerySubscription {
-    pub id: String,
-    pub sql: String,
-    pub params: Vec<String>, // Serialized parameters
-    pub dependent_tables: HashSet<String>,
-    pub last_result_keys: HashSet<String>,
-    pub last_result_hash: u64,
-}
-
-
-pub struct QueryObserver {
-    pub(crate) subscription_id: String,
-    pub(crate) db: Weak<RwLock<HashMap<String, QuerySubscription>>>,
-}
-
-impl Drop for QueryObserver {
-    fn drop(&mut self) {
-        if let Some(subscriptions) = self.db.upgrade() {
-            if let Ok(mut subs) = subscriptions.write() {
-                subs.remove(&self.subscription_id);
-            }
-        }
+    fn delete<T: Entity>(&self, entity: &T) -> anyhow::Result<()> {
+        todo!()
     }
 }
 

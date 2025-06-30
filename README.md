@@ -14,7 +14,8 @@ local-first applications, and is inspired by [Apple's Core Data + CloudKit](http
 ## Project Status
 
 DimpleDb is currently being developed and is not ready for use. Please
-leave a star and check back soon!
+follow and leave a star to be notified of new releases.
+
 
 ## Sync Engine
 
@@ -30,6 +31,7 @@ passphrase encryption.
 
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
+
 
 ## Inspiration and Research
 

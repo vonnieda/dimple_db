@@ -1,57 +1,15 @@
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use rusqlite::Connection;
-use rusqlite_migration::{M, Migrations};
+use rusqlite::{Connection, Params};
+use rusqlite_migration::{Migrations};
 use uuid::Uuid;
 
-use crate::notifier::Notifier;
-use crate::Entity;
-use super::types::QuerySubscription;
-
-/// Trait for types that can be converted into Migrations
-pub trait IntoMigrations {
-    fn into_migrations(self) -> Migrations<'static>;
-}
-
-impl IntoMigrations for Migrations<'static> {
-    fn into_migrations(self) -> Migrations<'static> {
-        self
-    }
-}
-
-impl IntoMigrations for &Migrations<'static> {
-    fn into_migrations(self) -> Migrations<'static> {
-        self.clone()
-    }
-}
-
-impl<const N: usize> IntoMigrations for &[&str; N] {
-    fn into_migrations(self) -> Migrations<'static> {
-        // Convert to owned strings to satisfy 'static lifetime requirement
-        let owned_sqls: Vec<String> = self.iter().map(|sql| sql.to_string()).collect();
-        let leaked_sqls: Vec<&'static str> = owned_sqls.into_iter().map(|s| Box::leak(s.into_boxed_str()) as &'static str).collect();
-        let migrations: Vec<M<'static>> = leaked_sqls.iter().map(|sql| M::up(sql)).collect();
-        Migrations::new(migrations)
-    }
-}
-
-impl IntoMigrations for &[&str] {
-    fn into_migrations(self) -> Migrations<'static> {
-        // Convert to owned strings to satisfy 'static lifetime requirement
-        let owned_sqls: Vec<String> = self.iter().map(|sql| sql.to_string()).collect();
-        let leaked_sqls: Vec<&'static str> = owned_sqls.into_iter().map(|s| Box::leak(s.into_boxed_str()) as &'static str).collect();
-        let migrations: Vec<M<'static>> = leaked_sqls.iter().map(|sql| M::up(sql)).collect();
-        Migrations::new(migrations)
-    }
-}
+use crate::{db::DbTransaction, Entity};
 
 #[derive(Clone)]
 pub struct Db {
-    pub(crate) conn: Arc<RwLock<Connection>>,
-    pub(crate) database_uuid: String,
-    pub(crate) subscriptions: Arc<RwLock<HashMap<String, QuerySubscription>>>,
-    pub(crate) query_notifier: Arc<Notifier<serde_json::Value>>, // Generic JSON notifications
+    conn: Arc<RwLock<Connection>>,
+    database_uuid: String,
 }
 
 impl Db {
@@ -65,18 +23,68 @@ impl Db {
         Self::from_connection(conn)
     }
 
+    pub fn migrate(&self, migrations: Migrations) -> anyhow::Result<()> {
+        let mut conn = self
+            .conn
+            .write()
+            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
+
+        migrations.to_latest(&mut *conn)?;
+
+        Ok(())
+    }
+
+    pub fn transact(&self, f: impl FnMut(DbTransaction) -> ()) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    // Okay, I think I know for sure I need transactions, right? Cause I wanna
+    // be able to create an artist album and rollback if it doesn't work?
+    // Yea, I need transactions, because like I need to be able to insert
+    // the artist, get it's id, then create the album, then the albumartist, and
+    // stuff like that. So I think the transaction thing is the way to do.
+    // And I guess save() could just be a wrapper for ease of use.
+    pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
+        let table_name = self.type_name::<T>();
+        // create a transaction
+        // get the table's column names
+        // map the entity's fields to columns
+        // insert or update the value, creating a uuidv7 id if needed
+        // record the change in history tables
+        // notify listeners
+        todo!()
+    }
+
+    pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Vec<T>> {
+        // run the query, use serde_rusqlite to convert back to entities
+        todo!()
+    }
+
+    pub fn query_one<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Option<T>> {
+        // shortcut for query().first()
+        todo!()
+    }
+
+    pub fn query_subscribe<T: Entity, P: Params, F: FnMut(Vec<T>) -> ()>(&self, sql: &str, params: P, cb: F) -> anyhow::Result<()> {
+        // run an explain query plan and extract names of tables that the query depends on
+        // and then when there are changes in any of those tables, re-run the query and
+        // call the callback with the results
+        todo!()
+    }
+
+    pub fn delete<T: Entity>(&self, entity: &T) -> anyhow::Result<()> {
+        todo!()
+    }
+
     fn from_connection(conn: Connection) -> anyhow::Result<Self> {
         let db = Db {
             conn: Arc::new(RwLock::new(conn)),
             database_uuid: "".to_string(), // Will be set after initialization
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            query_notifier: Arc::new(Notifier::new()),
         };
         db.init_connection()?;
         db.init_change_tracking_tables()?;
         let database_uuid = db.get_or_create_database_uuid()?;
         
-        // Update the database UUID
         let mut db = db;
         db.database_uuid = database_uuid;
         Ok(db)
@@ -90,8 +98,37 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         
-        // Register custom uuid7() function
         self.register_uuid7_function(&conn)?;
+
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS _metadata (
+                key TEXT NOT NULL PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS _transaction (
+                id TEXT NOT NULL PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                author TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS _change (
+                transaction_id TEXT NOT NULL,
+                entity_type TEXT NOT NULL,
+                entity_key TEXT NOT NULL,
+                attribute TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                PRIMARY KEY (transaction_id, entity_type, entity_key, attribute),
+                FOREIGN KEY (transaction_id) REFERENCES _transaction(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_change_entity ON _change(entity_type, entity_key);
+            CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON _transaction(timestamp);
+        ",
+        )?;
+
         
         Ok(())
     }
@@ -172,429 +209,18 @@ impl Db {
         Ok(uuid)
     }
 
-    pub fn migrate<T: IntoMigrations>(&self, migrations: T) -> anyhow::Result<()> {
-        let mut conn = self
-            .conn
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
-
-        let migrations = migrations.into_migrations();
-        migrations.to_latest(&mut *conn)?;
-
-        Ok(())
-    }
-
     pub fn get_database_uuid(&self) -> &str {
         &self.database_uuid
     }
 
-    pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
-        let table_name = self.type_name::<T>();
-
-        let mut entity_json = serde_json::to_value(entity)?;
-        self.ensure_entity_has_key(&mut entity_json)?;
-
-        let mut conn = self
-            .conn
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
-        let tx = conn.transaction()?;
-
-        let table_columns = self.get_table_columns(&tx, &table_name)?;
-        let all_params = serde_rusqlite::to_params_named(&entity_json)?;
-
-        let key_value = self.extract_key_value_from_json(&entity_json)?;
-        let exists = self.record_exists(&tx, &table_name, &key_value)?;
-
-        // Capture old values for change tracking
-        let old_entity = if exists {
-            let old_entity: T = self.get(&tx, &table_name, &key_value)?;
-            Some(serde_json::to_value(old_entity)?)
-        } else {
-            None
-        };
-
-        // Perform the database operation
-        if exists {
-            self.update_record(&tx, &table_name, &key_value, all_params, &table_columns)?;
-        } else {
-            self.insert_record(&tx, &table_name, all_params, &table_columns)?;
-        }
-
-        // Record attribute-level changes
-        self.record_changes(
-            &tx,
-            &table_name,
-            &key_value,
-            old_entity.as_ref(),
-            Some(&entity_json),
-        )?;
-
-        tx.commit()?;
-
-        // Release the write lock before triggering notifications
-        drop(conn);
-
-        // Trigger reactive query notifications after successful commit and lock release
-        self.notify_query_subscribers(&table_name, &key_value)?;
-
-        // Convert back to T for return
-        let final_entity: T = serde_json::from_value(entity_json)?;
-        Ok(final_entity)
-    }
-
-    pub(crate) fn type_name<T>(&self) -> String {
+    fn type_name<T>(&self) -> String {
         let full_name = std::any::type_name::<T>();
         // Extract just the struct name from the full path
         full_name.split("::").last().unwrap_or(full_name).to_string()
-    }
-
-    pub(crate) fn get_table_columns(
-        &self,
-        conn: &rusqlite::Connection,
-        table_name: &str,
-    ) -> anyhow::Result<Vec<String>> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table_name))?;
-        let column_iter = stmt.query_map([], |row| {
-            let column_name: String = row.get(1)?; // Column name is at index 1
-            Ok(column_name)
-        })?;
-
-        let mut columns = Vec::new();
-        for column in column_iter {
-            columns.push(column?);
-        }
-
-        if columns.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Table '{}' not found or has no columns",
-                table_name
-            ));
-        }
-
-        Ok(columns)
-    }
-
-    pub(crate) fn record_exists(
-        &self,
-        tx: &rusqlite::Transaction,
-        table_name: &str,
-        key: &str,
-    ) -> anyhow::Result<bool> {
-        let sql = format!("SELECT 1 FROM {} WHERE key = ? LIMIT 1", table_name);
-        Ok(tx.prepare(&sql)?.exists([key])?)
-    }
-
-    pub(crate) fn ensure_entity_has_key(
-        &self,
-        entity_json: &mut serde_json::Value,
-    ) -> anyhow::Result<()> {
-        // Generate a key if it doesn't exist or is empty
-        let needs_key = match entity_json.get("key") {
-            Some(key) => key.is_null() || (key.is_string() && key.as_str() == Some("")),
-            None => true,
-        };
-
-        if needs_key {
-            entity_json["key"] = serde_json::Value::String(Uuid::now_v7().to_string());
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn extract_key_value_from_json(
-        &self,
-        entity_json: &serde_json::Value,
-    ) -> anyhow::Result<String> {
-        entity_json
-            .get("key")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("Entity missing required 'key' field"))
-    }
-
-    pub(crate) fn get<T: Entity>(
-        &self,
-        tx: &rusqlite::Transaction,
-        table_name: &str,
-        key: &str,
-    ) -> anyhow::Result<T> {
-        let sql = format!("SELECT * FROM {} WHERE key = ?", table_name);
-        let mut stmt = tx.prepare(&sql)?;
-        let mut rows = stmt.query([key])?;
-
-        if let Some(row) = rows.next()? {
-            let entity: T = serde_rusqlite::from_row(row)?;
-            Ok(entity)
-        } else {
-            Err(anyhow::anyhow!("Record with key '{}' not found in table '{}'", key, table_name))
-        }
-    }
-
-    pub(crate) fn get_as_value(
-        &self,
-        tx: &rusqlite::Transaction,
-        table_name: &str,
-        key: &str,
-    ) -> anyhow::Result<serde_json::Value> {
-        let sql = format!("SELECT * FROM {} WHERE key = ?", table_name);
-        let mut stmt = tx.prepare(&sql)?;
-        let mut rows = stmt.query([key])?;
-
-        if let Some(row) = rows.next()? {
-            let map: std::collections::HashMap<String, serde_json::Value> = serde_rusqlite::from_row(row)?;
-            Ok(serde_json::Value::Object(map.into_iter().collect()))
-        } else {
-            Err(anyhow::anyhow!("Record not found"))
-        }
-    }
-
-    pub(crate) fn update_record(
-        &self,
-        tx: &rusqlite::Transaction,
-        table_name: &str,
-        key: &str,
-        all_params: serde_rusqlite::NamedParamSlice,
-        table_columns: &[String],
-    ) -> anyhow::Result<()> {
-        // Filter to only include columns that exist in the table and are not the key
-        let filtered_params: Vec<(String, &dyn rusqlite::ToSql)> = all_params
-            .iter()
-            .filter_map(|(name, value)| {
-                let column_name = name.strip_prefix(':').unwrap_or(name);
-                if column_name != "key" && table_columns.iter().any(|col| col == column_name) {
-                    Some((column_name.to_string(), value.as_ref()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if filtered_params.is_empty() {
-            return Ok(()); // Nothing to update
-        }
-
-        // Build single UPDATE statement with all columns
-        let set_clauses: Vec<String> = filtered_params
-            .iter()
-            .map(|(name, _)| format!("{} = ?", name))
-            .collect();
-
-        let sql = format!(
-            "UPDATE {} SET {} WHERE key = ?",
-            table_name,
-            set_clauses.join(", ")
-        );
-        log::debug!("SQL EXECUTE: {}", sql);
-
-        let mut stmt = tx.prepare(&sql)?;
-
-        // Build parameter list: all non-key values + key for WHERE clause
-        let mut values: Vec<&dyn rusqlite::ToSql> =
-            filtered_params.iter().map(|(_, value)| *value).collect();
-        values.push(&key);
-
-        let affected_rows = stmt.execute(&values[..])?;
-        log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
-        Ok(())
-    }
-
-    pub(crate) fn insert_record(
-        &self,
-        tx: &rusqlite::Transaction,
-        table_name: &str,
-        all_params: serde_rusqlite::NamedParamSlice,
-        table_columns: &[String],
-    ) -> anyhow::Result<()> {
-        // Filter to only include columns that exist in the table
-        let filtered_params: Vec<(String, &dyn rusqlite::ToSql)> = all_params
-            .iter()
-            .filter_map(|(name, value)| {
-                let column_name = name.strip_prefix(':').unwrap_or(name);
-                if table_columns.iter().any(|col| col == column_name) {
-                    Some((column_name.to_string(), value.as_ref()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if filtered_params.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No valid columns found for table '{}'",
-                table_name
-            ));
-        }
-
-        let column_names: Vec<&str> = filtered_params
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
-        let placeholders = vec!["?"; filtered_params.len()].join(", ");
-
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table_name,
-            column_names.join(", "),
-            placeholders
-        );
-        log::debug!("SQL EXECUTE: {}", sql);
-
-        let mut stmt = tx.prepare(&sql)?;
-        let values: Vec<&dyn rusqlite::ToSql> =
-            filtered_params.iter().map(|(_, value)| *value).collect();
-        let affected_rows = stmt.execute(&values[..])?;
-        log::debug!("SQL EXECUTE RESULT: {} rows affected", affected_rows);
-
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn test_database_uuid_persistence() -> anyhow::Result<()> {
-        use serde::{Deserialize, Serialize};
-
-        #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-        pub struct Artist {
-            pub key: String,
-            pub name: String,
-            pub disambiguation: Option<String>,
-        }
-
-        let db = crate::Db::open_memory()?;
-
-        // Save an artist to ensure change tracking works
-        if let Ok(conn) = db.conn.write() {
-            conn.execute_batch(
-                "
-                CREATE TABLE Artist (
-                    key            TEXT NOT NULL PRIMARY KEY,
-                    name           TEXT NOT NULL,
-                    disambiguation TEXT
-                );
-            ",
-            )?;
-        }
-
-        let artist = db.save(&Artist {
-            name: "Metallica".to_string(),
-            ..Default::default()
-        })?;
-
-        // Query changes - should have 2 (key + name) since tracking is always enabled
-        let changes = db.get_changes_for_entity("Artist", &artist.key)?;
-        assert_eq!(changes.len(), 2);
-
-        // Check that author is a valid UUID
-        assert!(!db.database_uuid.is_empty());
-        assert!(uuid::Uuid::parse_str(&db.database_uuid).is_ok());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_schema_migration() -> anyhow::Result<()> {
-        let db = crate::Db::open_memory()?;
-
-        // Define migrations
-        let migrations = &[
-            // Migration 1: Create users table
-            "CREATE TABLE users (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                email TEXT
-            );",
-            // Migration 2: Add age column
-            "ALTER TABLE users ADD COLUMN age INTEGER;",
-            // Migration 3: Create posts table
-            "CREATE TABLE posts (
-                id INTEGER PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );",
-        ];
-
-        // Run migrations
-        db.migrate(migrations)?;
-
-        // Verify tables were created
-        let conn = db.conn.read().unwrap();
-
-        // Check users table structure
-        let mut stmt = conn.prepare("PRAGMA table_info(users)")?;
-        let column_info: Vec<(i32, String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Should have id, name, email, age columns
-        assert_eq!(column_info.len(), 4);
-        assert_eq!(column_info[0].1, "id");
-        assert_eq!(column_info[1].1, "name");
-        assert_eq!(column_info[2].1, "email");
-        assert_eq!(column_info[3].1, "age");
-
-        // Check posts table exists
-        let mut stmt = conn.prepare("PRAGMA table_info(posts)")?;
-        let posts_columns: Vec<String> = stmt
-            .query_map([], |row| Ok(row.get::<_, String>(1)?))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        assert!(posts_columns.contains(&"id".to_string()));
-        assert!(posts_columns.contains(&"user_id".to_string()));
-        assert!(posts_columns.contains(&"title".to_string()));
-        assert!(posts_columns.contains(&"content".to_string()));
-
-        // Test that we can insert data
-        conn.execute(
-            "INSERT INTO users (name, email, age) VALUES (?, ?, ?)",
-            ["John Doe", "john@example.com", "30"],
-        )?;
-
-        conn.execute(
-            "INSERT INTO posts (user_id, title, content) VALUES (?, ?, ?)",
-            ["1", "Hello World", "This is my first post"],
-        )?;
-
-        // Verify data was inserted
-        let user_count: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?;
-        let post_count: i64 = conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
-
-        assert_eq!(user_count, 1);
-        assert_eq!(post_count, 1);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_migration_idempotency() -> anyhow::Result<()> {
-        let db = crate::Db::open_memory()?;
-
-        let migrations = &[
-            "CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT);",
-            "ALTER TABLE test_table ADD COLUMN email TEXT;",
-        ];
-
-        // Run migrations twice - should not fail
-        db.migrate(migrations)?;
-        db.migrate(migrations)?;
-
-        // Verify table structure is correct
-        let conn = db.conn.read().unwrap();
-        let mut stmt = conn.prepare("PRAGMA table_info(test_table)")?;
-        let columns: Vec<String> = stmt
-            .query_map([], |row| Ok(row.get::<_, String>(1)?))?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        assert_eq!(columns.len(), 3);
-        assert!(columns.contains(&"id".to_string()));
-        assert!(columns.contains(&"name".to_string()));
-        assert!(columns.contains(&"email".to_string()));
-
-        Ok(())
-    }
 }

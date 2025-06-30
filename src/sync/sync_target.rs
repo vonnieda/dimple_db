@@ -10,6 +10,9 @@ pub trait SyncTarget {
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
     fn get(&self, path: &str) -> Result<Vec<u8>>;
     fn put(&self, path: &str, content: &[u8]) -> Result<()>;
+    fn delete(&self, path: &str) -> Result<()> {
+        todo!()
+    }
 }
 
 pub struct S3Storage {

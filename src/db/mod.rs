@@ -1,9 +1,7 @@
 // Re-export all public items from the db modules
 pub use types::*;
-pub use core::{Db, IntoMigrations};
+pub use core::{Db};
+pub use rusqlite_migration::*;
 
 pub mod types;
 pub mod core;
-pub mod query;
-pub mod history;
-pub mod reactive;
