@@ -4,12 +4,13 @@ DimpleDb is a reactive SQLite database wrapper for Rust that provides:
 
 - Plain SQL for queries, schemas, and migrations.
 - Simple table-to-struct mapping with serde.
-- Automatic change tracking and history.
+- Automatic history tracking.
 - Reactive queries with live updates.
 - Multi-author encrypted sync via any S3 compatible endpoint.
 
 DimpleDb is designed for storing and syncing user data across devices in
-local-first applications, and is inspired by [Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
+local-first applications, and is inspired by 
+[Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
 
 ## Project Status
 
@@ -48,4 +49,9 @@ level.
 - [WatermelondDB: A reactive database framework](https://github.com/nozbe/WatermelonDB)
 - [Drift is a reactive persistence library for Flutter and Dart, built on top of SQLite](https://github.com/simolus3/drift)
 - [Electric SQL: Real-time sync for Postgres.](https://github.com/electric-sql/electric)
+- [LiveStore: Reactive SQLite for local-first apps](https://livestore.dev/)	
+- [Riffle: Streaming replication for SQLite](https://riffle.systems/)	
+- [TinyBase: The reactive data store for local-first apps](https://github.com/tinyplex/tinybase)	
+- [Drift: The fuss-free SQLite abstraction for Dart & Flutter](https://drift.simonbinder.eu/)
+- [Ordering Distributed Events](https://medium.com/baseds/ordering-distributed-events-29c1dd9d1eff)
 

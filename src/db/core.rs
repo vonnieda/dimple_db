@@ -23,7 +23,7 @@ impl Db {
         Self::from_connection(conn)
     }
 
-    pub fn migrate(&self, migrations: Migrations) -> anyhow::Result<()> {
+    pub fn migrate(&self, migrations: &Migrations) -> anyhow::Result<()> {
         let mut conn = self
             .conn
             .write()
@@ -34,16 +34,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn transact(&self, f: impl FnMut(DbTransaction) -> ()) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    // Okay, I think I know for sure I need transactions, right? Cause I wanna
-    // be able to create an artist album and rollback if it doesn't work?
-    // Yea, I need transactions, because like I need to be able to insert
-    // the artist, get it's id, then create the album, then the albumartist, and
-    // stuff like that. So I think the transaction thing is the way to do.
-    // And I guess save() could just be a wrapper for ease of use.
     pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
         let table_name = self.type_name::<T>();
         // create a transaction
@@ -69,6 +59,8 @@ impl Db {
         // run an explain query plan and extract names of tables that the query depends on
         // and then when there are changes in any of those tables, re-run the query and
         // call the callback with the results
+        // I want to implement this in terms of a higher level event system, like
+        // before.
         todo!()
     }
 

@@ -1,11 +1,12 @@
-use std::time::Duration;
-
-use dimple_db::Db;
+use dimple_db::{sync::{InMemoryStorage, Sync}, Db};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
 fn main() -> anyhow::Result<()> {
-    let db = Db::open_memory()?;
+    let db1 = Db::open_memory()?;
+    let db2 = Db::open_memory()?;
+    let sync = Sync::new(Box::new(InMemoryStorage::new()))?;
+
     let migrations = Migrations::new(vec![
         M::up("
             CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -18,32 +19,42 @@ fn main() -> anyhow::Result<()> {
         "),
         M::up("ALTER TABLE Artist ADD COLUMN summary TEXT;"),
     ]);
-    db.migrate(migrations)?;
-    let artist = db.save(&Artist {
-        name: "Metallica".to_string(),
-        ..Default::default()
-    })?;
+    db1.migrate(&migrations)?;
+    db2.migrate(&migrations)?;
+
     let sql = "SELECT Album.* FROM Album 
         JOIN Album_Artist ON (Album_Artist.album_id = Album.id)
-        WHERE Album_Artist.artist_id = ?";
+        JOIN Artist ON (Album_Artist.artist_id = Artist.id)
+        WHERE Artist.name = ?";
+    // db2.query(sql, ("Metallica",)).subscribe(|albums: Vec<Album>| {
+    //     println!("")
+    // })?;
 
-    // Okay, another thing I could do is return an observable vec that is
-    // always up to date. I guess it would be easy enough to extend to that.
-    // The core is really two things: tracking which tables a query depends on,
-    // and notifing when one of them changes.
-    db.query_subscribe(sql, (&artist.id,), |albums: Vec<Album>| {
-        dbg!(albums);
-    })?;
-    let album = db.save(&Album {
-        title: "...And Justice For All".to_string(),
-        ..Default::default()
-    })?;
-    db.save(&AlbumArtist {
-        album_id: album.id,
-        artist_id: artist.id.clone(),
-        ..Default::default()
-    })?;
-    std::thread::sleep(Duration::from_millis(100));
+    
+
+    // let artist = db.save(&Artist {
+    //     name: "Metallica".to_string(),
+    //     ..Default::default()
+    // })?;
+    // let sql = "SELECT Album.* FROM Album 
+    //     JOIN Album_Artist ON (Album_Artist.album_id = Album.id)
+    //     WHERE Album_Artist.artist_id = ?";
+
+    // // The core is really two things: tracking which tables a query depends on,
+    // // and notifing when one of them changes.
+    // db.query_subscribe(sql, (&artist.id,), |albums: Vec<Album>| {
+    //     dbg!(albums);
+    // })?;
+    // let album = db.save(&Album {
+    //     title: "...And Justice For All".to_string(),
+    //     ..Default::default()
+    // })?;
+    // db.save(&AlbumArtist {
+    //     album_id: album.id,
+    //     artist_id: artist.id.clone(),
+    //     ..Default::default()
+    // })?;
+    // std::thread::sleep(Duration::from_millis(100));
     Ok(())
 }
 
@@ -58,6 +69,10 @@ pub struct Artist {
 pub struct Album {
     pub id: String,
     pub title: String,
+}
+
+impl Album {
+
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
