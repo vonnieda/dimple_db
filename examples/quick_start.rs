@@ -36,15 +36,16 @@ fn main() -> anyhow::Result<()> {
             name: "Metallica".to_string(),
             ..Default::default()
         })?;
-        // let album = txn.save(Album {
-        //     title: "...And Justice For All".to_string(),
-        //     ..Default::default()
-        // })?;
-        // txn.save(AlbumArtist {
-        //     album_id: album.id,
-        //     artist_id: artist.id,
-        //     ..Default::default()
-        // })?;
+        let album = txn.save(&Album {
+            title: "...And Justice For All".to_string(),
+            ..Default::default()
+        })?;
+        txn.save(&AlbumArtist {
+            album_id: album.id,
+            artist_id: artist.id,
+            ..Default::default()
+        })?;
+        Ok(())
     })?;
 
     let sync = SyncEngine::builder()

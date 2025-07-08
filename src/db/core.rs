@@ -46,7 +46,7 @@ impl Db {
     //     todo!()
     // }
 
-    pub fn transaction<F: FnMut(DbTransaction) -> ()>(&self, cb: F) -> Result<()> {
+    pub fn transaction<F: FnMut(DbTransaction) -> Result<()>>(&self, cb: F) -> Result<()> {
         todo!()
     }
 
