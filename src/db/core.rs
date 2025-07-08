@@ -1,10 +1,11 @@
 use std::sync::{Arc, RwLock};
 
+use anyhow::Result;
 use rusqlite::{Connection, Params};
 use rusqlite_migration::{Migrations};
 use uuid::Uuid;
 
-use crate::{db::DbTransaction, Entity};
+use crate::{db::{query::DbQuery, DbTransaction}, Entity};
 
 #[derive(Clone)]
 pub struct Db {
@@ -34,39 +35,48 @@ impl Db {
         Ok(())
     }
 
-    pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
-        let table_name = self.type_name::<T>();
-        // create a transaction
-        // get the table's column names
-        // map the entity's fields to columns
-        // insert or update the value, creating a uuidv7 id if needed
-        // record the change in history tables
-        // notify listeners
+    // pub fn save<T: Entity>(&self, entity: &T) -> anyhow::Result<T> {
+    //     let table_name = self.type_name::<T>();
+    //     // create a transaction
+    //     // get the table's column names
+    //     // map the entity's fields to columns
+    //     // insert or update the value, creating a uuidv7 id if needed
+    //     // record the change in history tables
+    //     // notify listeners
+    //     todo!()
+    // }
+
+    pub fn transaction<F: FnMut(DbTransaction) -> ()>(&self, cb: F) -> Result<()> {
         todo!()
     }
 
-    pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Vec<T>> {
+    pub fn query<P: Params>(&self, sql: &str, params: P) -> DbQuery {
         // run the query, use serde_rusqlite to convert back to entities
         todo!()
     }
 
-    pub fn query_one<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Option<T>> {
-        // shortcut for query().first()
-        todo!()
-    }
+    // pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Vec<T>> {
+    //     // run the query, use serde_rusqlite to convert back to entities
+    //     todo!()
+    // }
 
-    pub fn query_subscribe<T: Entity, P: Params, F: FnMut(Vec<T>) -> ()>(&self, sql: &str, params: P, cb: F) -> anyhow::Result<()> {
-        // run an explain query plan and extract names of tables that the query depends on
-        // and then when there are changes in any of those tables, re-run the query and
-        // call the callback with the results
-        // I want to implement this in terms of a higher level event system, like
-        // before.
-        todo!()
-    }
+    // pub fn query_one<T: Entity, P: Params>(&self, sql: &str, params: P) -> anyhow::Result<Option<T>> {
+    //     // shortcut for query().first()
+    //     todo!()
+    // }
 
-    pub fn delete<T: Entity>(&self, entity: &T) -> anyhow::Result<()> {
-        todo!()
-    }
+    // pub fn query_subscribe<T: Entity, P: Params, F: FnMut(Vec<T>) -> ()>(&self, sql: &str, params: P, cb: F) -> anyhow::Result<()> {
+    //     // run an explain query plan and extract names of tables that the query depends on
+    //     // and then when there are changes in any of those tables, re-run the query and
+    //     // call the callback with the results
+    //     // I want to implement this in terms of a higher level event system, like
+    //     // before.
+    //     todo!()
+    // }
+
+    // pub fn delete<T: Entity>(&self, entity: &T) -> anyhow::Result<()> {
+    //     todo!()
+    // }
 
     fn from_connection(conn: Connection) -> anyhow::Result<Self> {
         let db = Db {
