@@ -87,7 +87,6 @@ impl Db {
             Ok(Uuid::now_v7().to_string())
         })?;
 
-        // TODO I think I'd rather pass the conn
         Self::init_change_tracking_tables(&conn)?;
 
         let db = Db {
@@ -97,36 +96,32 @@ impl Db {
         Ok(db)
     }
 
+    /// ZV is used as a prefix for the internal tables. Z puts them
+    /// at the end of alphabetical lists and V differentiates them from
+    /// Core Data tables.
     fn init_change_tracking_tables(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
-            CREATE TABLE IF NOT EXISTS _metadata (
+            CREATE TABLE IF NOT EXISTS ZV_METADATA (
                 key TEXT NOT NULL PRIMARY KEY,
                 value TEXT NOT NULL
             );
 
-            INSERT OR IGNORE INTO _metadata (key, value) 
+            INSERT OR IGNORE INTO ZV_METADATA (key, value) 
                 VALUES ('database_uuid', uuid7());
 
-            CREATE TABLE IF NOT EXISTS _transaction (
+            CREATE TABLE IF NOT EXISTS ZV_TRANSACTION (
                 id TEXT NOT NULL PRIMARY KEY,
-                timestamp INTEGER NOT NULL,
                 author TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS _change (
+            CREATE TABLE IF NOT EXISTS ZV_CHANGE (
+                id TEXT NOT NULL PRIMARY KEY,
                 transaction_id TEXT NOT NULL,
                 entity_type TEXT NOT NULL,
                 entity_key TEXT NOT NULL,
-                attribute TEXT NOT NULL,
-                old_value TEXT,
-                new_value TEXT,
-                PRIMARY KEY (transaction_id, entity_type, entity_key, attribute),
-                FOREIGN KEY (transaction_id) REFERENCES _transaction(id)
+                FOREIGN KEY (transaction_id) REFERENCES ZV_TRANSACTION(id)
             );
-
-            CREATE INDEX IF NOT EXISTS idx_change_entity ON _change(entity_type, entity_key);
-            CREATE INDEX IF NOT EXISTS idx_transaction_timestamp ON _transaction(timestamp);
         ")?;
         Ok(())
     }
@@ -144,6 +139,12 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     use crate::db::Db;
+
+    #[test]
+    fn open_memory() -> Result<()> {
+        let _ = Db::open_memory()?;
+        Ok(())
+    }
 
     #[test]
     fn type_name() -> Result<()> {
