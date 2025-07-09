@@ -185,16 +185,12 @@ impl <'a> DbTransaction<'a> {
         let mut entity_value = serde_json::to_value(entity)?;
         
         let entity_id = self.ensure_entity_id(&mut entity_value)?;
-        let exists = self.entity_exists(&table_name, &entity_id)?;
         
-        // Get old entity for change tracking if it exists
-        let old_entity = if exists {
-            self.get_entity_by_id(&table_name, &entity_id, &column_names)?
-        } else {
-            None
-        };
+        // Get old entity for change tracking (returns None if entity doesn't exist)
+        let old_entity = self.get_entity_by_id(&table_name, &entity_id)?;
+        let exists = old_entity.is_some();
         
-        // Save the transaction record
+        // Record transaction first
         self.record_transaction()?;
         
         if exists {
@@ -203,7 +199,7 @@ impl <'a> DbTransaction<'a> {
             self.insert_entity(&table_name, &column_names, &entity_value)?;
         }
         
-        // Track changes (inserts are changes from null values)
+        // Track changes
         self.track_changes(&table_name, &entity_id, old_entity.as_ref(), &entity_value)?;
         
         // TODO: Notify subscribers
@@ -222,13 +218,6 @@ impl <'a> DbTransaction<'a> {
         }
     }
     
-    fn entity_exists(&self, table_name: &str, entity_id: &str) -> Result<bool> {
-        self.txn.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id = ?)", table_name),
-            [entity_id],
-            |row| row.get(0)
-        ).map_err(Into::into)
-    }
     
     fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
         let set_clause = column_names
@@ -265,28 +254,10 @@ impl <'a> DbTransaction<'a> {
         Ok(())
     }
     
-    fn get_entity_by_id(&self, table_name: &str, entity_id: &str, column_names: &[String]) -> Result<Option<serde_json::Value>> {
-        let sql = format!("SELECT {} FROM {} WHERE id = ?", column_names.join(", "), table_name);
-        let mut stmt = self.txn.prepare(&sql)?;
-        let mut rows = stmt.query([entity_id])?;
-        
-        match rows.next()? {
-            Some(row) => {
-                let mut map = serde_json::Map::new();
-                for (i, col) in column_names.iter().enumerate() {
-                    let value: serde_json::Value = match row.get_ref(i)? {
-                        rusqlite::types::ValueRef::Null => serde_json::Value::Null,
-                        rusqlite::types::ValueRef::Integer(i) => serde_json::Value::Number(serde_json::Number::from(i)),
-                        rusqlite::types::ValueRef::Real(f) => serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap()),
-                        rusqlite::types::ValueRef::Text(s) => serde_json::Value::String(String::from_utf8_lossy(s).to_string()),
-                        rusqlite::types::ValueRef::Blob(_) => serde_json::Value::Null, // Skip blobs for now
-                    };
-                    map.insert(col.clone(), value);
-                }
-                Ok(Some(serde_json::Value::Object(map)))
-            }
-            None => Ok(None)
-        }
+    fn get_entity_by_id(&self, table_name: &str, entity_id: &str) -> Result<Option<serde_json::Value>> {
+        let sql = format!("SELECT * FROM {} WHERE id = ?", table_name);
+        let results: Vec<serde_json::Value> = self.query(&sql, [entity_id])?;
+        Ok(results.into_iter().next())
     }
     
     fn record_transaction(&self) -> Result<()> {
