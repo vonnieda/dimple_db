@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use anyhow::Result;
-use dimple_db::{db::Db, sync::SyncEngine};
+use dimple_db::{sync::SyncEngine, Db};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
@@ -22,27 +20,17 @@ fn main() -> Result<()> {
 
     let db1 = Db::open_memory()?;
     db1.migrate(&migrations)?;
-    let sql = "SELECT Album.* FROM Album 
-        JOIN Album_Artist ON (Album_Artist.album_id = Album.id)
-        JOIN Artist ON (Album_Artist.artist_id = Artist.id)
-        WHERE Artist.name = ?";
-    db1.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
-        dbg!(albums);
-    })?;
-
-    let db2 = Db::open_memory()?;
-    db2.migrate(&migrations)?;
-    db2.transaction(|txn| {
-        let artist = db2.save(txn, &Artist {
+    db1.transaction(|txn| {
+        let artist = txn.save(&Artist {
             name: "Metallica".to_string(),
             ..Default::default()
         })?;
 
-        let album = db2.save(txn, &Album {
+        let album = txn.save(&Album {
             title: "...And Justice For All".to_string(),
             ..Default::default()
         })?;
-        db2.save(txn, &AlbumArtist {
+        txn.save(&AlbumArtist {
             album_id: album.id,
             artist_id: artist.id,
             ..Default::default()
@@ -50,15 +38,26 @@ fn main() -> Result<()> {
         Ok(())
     })?;
 
+    let db2 = Db::open_memory()?;
+    db2.migrate(&migrations)?;
+    let sql = "SELECT Album.* FROM Album 
+        JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
+        JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
+        WHERE Artist.name = ?";
+    let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
+        dbg!(albums);
+    })?;
+    // Subscription will live as long as _sub does.
+
     let sync = SyncEngine::builder()
         .in_memory()
         .encrypted("correct horse battery staple")
         .build()?;
     sync.sync(&db1)?;
     sync.sync(&db2)?;
-    sync.sync(&db1)?;
 
-    std::thread::sleep(Duration::from_millis(100));
+    assert!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len() == 1);
+
     Ok(())
 }
 
