@@ -1,4 +1,4 @@
-use std::{sync::{mpsc::Receiver, Arc, RwLock}};
+use std::{sync::{mpsc::{self, Sender, Receiver}, Arc, RwLock, Mutex}};
 
 use anyhow::Result;
 use rusqlite::{functions::FunctionFlags, Connection, Params, Transaction};
@@ -10,6 +10,7 @@ use crate::db::{query::QuerySubscription, Entity};
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<RwLock<Connection>>,
+    subscribers: Arc<Mutex<Vec<Sender<DbEvent>>>>,
 }
 
 impl Db {
@@ -35,9 +36,16 @@ impl Db {
     }
 
     /// Subscribe to be notified of any insert, update, or delete to the database.
-    /// Dropped Receivers will be lazily cleaned up.
+    /// Dropped Receivers will be lazily cleaned up on the next event broadcast.
     pub fn subscribe(&self) -> Receiver<DbEvent> {
-        todo!()
+        let (tx, rx) = mpsc::channel();
+        
+        // Add to subscriber list
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            subscribers.push(tx);
+        }
+        
+        rx
     }
 
     /// Calls the supplied closure with a database transaction that can be
@@ -98,6 +106,7 @@ impl Db {
 
         let db = Db {
             conn: Arc::new(RwLock::new(conn)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
         };
 
         Ok(db)
@@ -155,10 +164,20 @@ impl Db {
         
         Ok(column_names)
     }
+    
+    fn notify_subscribers(&self, event: DbEvent) {
+        if let Ok(mut subscribers) = self.subscribers.lock() {
+            // Send to all subscribers, remove ones that fail
+            subscribers.retain(|tx| {
+                tx.send(event.clone()).is_ok()
+            });
+        }
+    }
 }
 
 /// Sent to subscribers whenever the database is changed. Each variant includes
 /// the entity_name and entity_id.
+#[derive(Clone, Debug)]
 pub enum DbEvent {
     Insert(String, String),
     Update(String, String),
@@ -202,7 +221,13 @@ impl <'a> DbTransaction<'a> {
         // Track changes
         self.track_changes(&table_name, &entity_id, old_entity.as_ref(), &entity_value)?;
         
-        // TODO: Notify subscribers
+        // Notify subscribers
+        let event = if exists {
+            DbEvent::Update(table_name.clone(), entity_id.clone())
+        } else {
+            DbEvent::Insert(table_name.clone(), entity_id.clone())
+        };
+        self.db.notify_subscribers(event);
         
         serde_json::from_value(entity_value).map_err(Into::into)
     }
@@ -425,6 +450,63 @@ mod tests {
         assert_eq!(summary_changes[0].1, "summary");
         assert_eq!(summary_changes[0].2, None); // old_value was null (SQL NULL)
         assert_eq!(summary_changes[0].3, Some("\"English rock band\"".to_string())); // new_value
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn subscriber_notifications() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        use std::time::Duration;
+        use crate::db::core::DbEvent;
+        
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Subscribe to events
+        let receiver = db.subscribe();
+        
+        // Create an artist (should trigger Insert event)
+        let artist_id = db.transaction(|txn| {
+            let artist = txn.save(&Artist {
+                name: "Radiohead".to_string(),
+                ..Default::default()
+            })?;
+            Ok(artist.id)
+        })?;
+        
+        // Check for Insert event
+        let event = receiver.recv_timeout(Duration::from_millis(100))?;
+        match event {
+            DbEvent::Insert(table_name, entity_id) => {
+                assert_eq!(table_name, "Artist");
+                assert_eq!(entity_id, artist_id);
+            }
+            _ => panic!("Expected Insert event, got {:?}", event),
+        }
+        
+        // Update the artist (should trigger Update event)
+        db.transaction(|txn| {
+            txn.save(&Artist {
+                id: artist_id.clone(),
+                name: "Radiohead".to_string(),
+                summary: Some("English rock band".to_string()),
+            })?;
+            Ok(())
+        })?;
+        
+        // Check for Update event
+        let event = receiver.recv_timeout(Duration::from_millis(100))?;
+        match event {
+            DbEvent::Update(table_name, entity_id) => {
+                assert_eq!(table_name, "Artist");
+                assert_eq!(entity_id, artist_id);
+            }
+            _ => panic!("Expected Update event, got {:?}", event),
+        }
         
         Ok(())
     }
