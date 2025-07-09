@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dimple_db::{sync::SyncEngine, Db};
+use dimple_db::Db;
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
@@ -40,23 +40,26 @@ fn main() -> Result<()> {
 
     let db2 = Db::open_memory()?;
     db2.migrate(&migrations)?;
-    let sql = "SELECT Album.* FROM Album 
-        JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
-        JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
-        WHERE Artist.name = ?";
-    let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
-        dbg!(albums);
-    })?;
-    // Subscription will live as long as _sub does.
+    // TODO query_subscribe not yet implemented
+    // let sql = "SELECT Album.* FROM Album 
+    //     JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
+    //     JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
+    //     WHERE Artist.name = ?";
+    // let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
+    //     dbg!(albums);
+    // })?;
+    // // Subscription will live as long as _sub does.
 
-    let sync = SyncEngine::builder()
-        .in_memory()
-        .encrypted("correct horse battery staple")
-        .build()?;
-    sync.sync(&db1)?;
-    sync.sync(&db2)?;
 
-    assert!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len() == 1);
+    // TODO sync not yet implemented
+    // let sync = SyncEngine::builder()
+    //     .in_memory()
+    //     .encrypted("correct horse battery staple")
+    //     .build()?;
+    // sync.sync(&db1)?;
+    // sync.sync(&db2)?;
+
+    // assert!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len() == 1);
 
     Ok(())
 }

@@ -49,7 +49,11 @@ impl Db {
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
 
         let txn = conn.transaction()?;
-        let result = f(&DbTransaction { db: self, txn: &txn })?;
+        let result = f(&DbTransaction { 
+            db: self, 
+            txn: &txn,
+            id: Uuid::now_v7().to_string(),
+        })?;
         txn.commit()?;
 
         Ok(result)
@@ -139,7 +143,17 @@ impl Db {
     }
 
     fn table_column_names(&self, txn: &Transaction, table_name: &str) -> Result<Vec<String>> {
-        todo!()
+        let mut stmt = txn.prepare(&format!("PRAGMA table_info({})", table_name))?;
+        let column_names = stmt.query_map([], |row| {
+            row.get::<_, String>(1) // Column name is at index 1
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+        
+        if column_names.is_empty() {
+            return Err(anyhow::anyhow!("Table '{}' not found or has no columns", table_name));
+        }
+        
+        Ok(column_names)
     }
 }
 
@@ -154,6 +168,7 @@ pub enum DbEvent {
 pub struct DbTransaction<'a> {
     db: &'a Db,
     txn: &'a Transaction<'a>,
+    id: String,
 }
 
 impl <'a> DbTransaction<'a> {
@@ -164,31 +179,85 @@ impl <'a> DbTransaction<'a> {
     /// id. A diff between the old entity, if any, and the new is created and
     /// saved in the change tracking tables. Subscribers are then notified
     /// of the changes and the newly inserted or updated entity is returned.
-    /// 
-    /// TODO This will need a transaction id for the ZV_TRANSACTION table, or
-    /// maybe this should just be in DbTransaction.
     pub fn save<T: Entity>(&self, entity: &T) -> Result<T> {
-        // let table_name = self.type_name::<T>();
-        // get the table's column names
-        // map the entity's fields to columns
-        // insert or update the value, creating a uuidv7 id if needed
-        // record the change in history tables
-        // notify listeners (maybe with the transaction id)
-        //   ideally this could be triggered by the writes to the history tables
-        //   and really the information saved there is the core of what the
-        //   listeners need to know
-        //   leads pretty logically to having a context that knows its place in
-        //   the changelog
         let table_name = self.db.table_name_for_type::<T>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
-        let entity_value = serde_json::to_value(entity)?;
-        let entity_id = // TODO get the id field from entity_value, or create a new id
-        todo!()
+        let mut entity_value = serde_json::to_value(entity)?;
+        
+        let entity_id = self.ensure_entity_id(&mut entity_value)?;
+        let exists = self.entity_exists(&table_name, &entity_id)?;
+        
+        if exists {
+            self.update_entity(&table_name, &column_names, &entity_value)?;
+        } else {
+            self.insert_entity(&table_name, &column_names, &entity_value)?;
+        }
+        
+        // TODO: Implement change tracking in ZV_CHANGE table
+        // TODO: Notify subscribers
+        
+        serde_json::from_value(entity_value).map_err(Into::into)
+    }
+    
+    fn ensure_entity_id(&self, entity_value: &mut serde_json::Value) -> Result<String> {
+        match entity_value.get("id").and_then(|v| v.as_str()) {
+            Some(id) if !id.is_empty() => Ok(id.to_string()),
+            _ => {
+                let new_id = Uuid::now_v7().to_string();
+                entity_value["id"] = serde_json::Value::String(new_id.clone());
+                Ok(new_id)
+            }
+        }
+    }
+    
+    fn entity_exists(&self, table_name: &str, entity_id: &str) -> Result<bool> {
+        self.txn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE id = ?)", table_name),
+            [entity_id],
+            |row| row.get(0)
+        ).map_err(Into::into)
+    }
+    
+    fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
+        let set_clause = column_names
+            .iter()
+            .filter(|col| *col != "id")
+            .map(|col| format!("{} = :{}", col, col))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let sql = format!("UPDATE {} SET {} WHERE id = :id", table_name, set_clause);
+        self.execute_with_named_params(&sql, entity_value)
+    }
+    
+    fn insert_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
+        let placeholders = column_names
+            .iter()
+            .map(|col| format!(":{}", col))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            table_name,
+            column_names.join(", "),
+            placeholders
+        );
+        self.execute_with_named_params(&sql, entity_value)
+    }
+    
+    fn execute_with_named_params(&self, sql: &str, entity_value: &serde_json::Value) -> Result<()> {
+        let mut stmt = self.txn.prepare(sql)?;
+        let params = serde_rusqlite::to_params_named(entity_value)?;
+        stmt.execute(params.to_slice().as_slice())?;
+        Ok(())
     }
 
     pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<T>> {
-        // run the query, use serde_rusqlite to convert back to entities
-        todo!()
+        let mut stmt = self.txn.prepare(sql)?;
+        let entities = serde_rusqlite::from_rows::<T>(stmt.query(params)?)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entities)
     }
 }
 
@@ -216,7 +285,14 @@ mod tests {
 
     #[test]
     fn save() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        
         let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        
         let artist = db.transaction(|txn| {
             let mut artist = txn.save(&Artist::default())?;
             artist.name = "Deftones".to_string();
@@ -224,6 +300,7 @@ mod tests {
             Ok(artist)
         })?;
         assert!(uuid::Uuid::parse_str(&artist.id).is_ok());
+        assert_eq!(artist.name, "Deftones");
         Ok(())
     }
 
