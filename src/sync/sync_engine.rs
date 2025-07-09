@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{sync::{encrypted_storage::EncryptedStorage, s3_storage::S3Storage, SyncStorage}, Db};
+use crate::{db::Db, sync::{encrypted_storage::EncryptedStorage, local_storage::LocalStorage, memory_storage::InMemoryStorage, s3_storage::S3Storage, SyncStorage}};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -30,6 +30,12 @@ pub struct SyncEngineBuilder {
 
 impl SyncEngineBuilder {
     pub fn in_memory(mut self) -> Self {
+        self.storage = Some(Box::new(InMemoryStorage::new()));
+        self
+    }
+
+    pub fn local(mut self, base_path: &str) -> Self {
+        self.storage = Some(Box::new(LocalStorage::new(base_path)));
         self
     }
 
@@ -48,7 +54,7 @@ impl SyncEngineBuilder {
         self
     }
 
-    pub fn build(mut self) -> Result<SyncEngine> {
+    pub fn build(self) -> Result<SyncEngine> {
         if let Some(passphrase) = self.passphrase {
             let storage = EncryptedStorage::new(self.storage.unwrap(), passphrase);
             SyncEngine::new_with_storage(Box::new(storage))

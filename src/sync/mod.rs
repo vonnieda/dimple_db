@@ -5,7 +5,6 @@ pub mod s3_storage;
 pub mod local_storage;
 pub mod memory_storage;
 
-// Re-export all public items from the sync modules
 pub use sync_storage::*;
 pub use sync_engine::*;
 

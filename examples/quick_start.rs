@@ -1,10 +1,11 @@
 use std::time::Duration;
 
-use dimple_db::{sync::SyncEngine, Db};
+use anyhow::Result;
+use dimple_db::{db::Db, sync::SyncEngine};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let migrations = Migrations::new(vec![
         M::up("
             CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -25,22 +26,23 @@ fn main() -> anyhow::Result<()> {
         JOIN Album_Artist ON (Album_Artist.album_id = Album.id)
         JOIN Artist ON (Album_Artist.artist_id = Artist.id)
         WHERE Artist.name = ?";
-    db1.query(sql, ("Metallica",)).subscribe(|albums: Vec<Album>| {
+    db1.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
         dbg!(albums);
     })?;
 
     let db2 = Db::open_memory()?;
     db2.migrate(&migrations)?;
     db2.transaction(|txn| {
-        let artist = txn.save(&Artist {
+        let artist = db2.save(txn, &Artist {
             name: "Metallica".to_string(),
             ..Default::default()
         })?;
-        let album = txn.save(&Album {
+
+        let album = db2.save(txn, &Album {
             title: "...And Justice For All".to_string(),
             ..Default::default()
         })?;
-        txn.save(&AlbumArtist {
+        db2.save(txn, &AlbumArtist {
             album_id: album.id,
             artist_id: artist.id,
             ..Default::default()

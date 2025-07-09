@@ -1,9 +1,8 @@
-pub mod types;
+pub mod entity;
 pub mod core;
 pub mod query;
 
-// Re-export all public items from the db modules
-pub use types::*;
-pub use core::{Db};
+pub use entity::*;
+pub use core::*;
 pub use rusqlite_migration::*;
 
