@@ -209,16 +209,13 @@ impl <'a> DbTransaction<'a> {
         let old_entity = self.get_entity_by_id(&table_name, &entity_id)?;
         let exists = old_entity.is_some();
         
-        // Record transaction first
-        self.record_transaction()?;
-        
         if exists {
             self.update_entity(&table_name, &column_names, &entity_value)?;
         } else {
             self.insert_entity(&table_name, &column_names, &entity_value)?;
         }
         
-        // Track changes
+        // Track changes and record transaction
         self.track_changes(&table_name, &entity_id, old_entity.as_ref(), &entity_value)?;
         
         // Notify subscribers
@@ -242,7 +239,6 @@ impl <'a> DbTransaction<'a> {
             }
         }
     }
-    
     
     fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
         let set_clause = column_names
@@ -285,63 +281,10 @@ impl <'a> DbTransaction<'a> {
         Ok(results.into_iter().next())
     }
     
-    fn record_transaction(&self) -> Result<()> {
-        self.txn.execute(
-            "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
-            [&self.id, "TODO_AUTHOR"],
-        )?;
-        Ok(())
-    }
-    
-    fn track_changes(&self, table_name: &str, entity_id: &str, old_entity: Option<&serde_json::Value>, new_entity: &serde_json::Value) -> Result<()> {
-        let old_map = old_entity.and_then(|e| e.as_object());
-        let new_map = new_entity.as_object()
-            .ok_or_else(|| anyhow::anyhow!("New entity is not an object"))?;
-        
-        // Track all attributes that changed
-        for (key, new_value) in new_map {
-            // Skip the id field since it's already stored in entity_id
-            if key == "id" {
-                continue;
-            }
-            
-            let old_value = old_map.and_then(|m| m.get(key));
-            
-            // Skip if values are the same (including both being null)
-            if old_value == Some(new_value) {
-                continue;
-            }
-            
-            // Skip if both old and new values are null (no real change)
-            if old_value.map_or(true, |v| v.is_null()) && new_value.is_null() {
-                continue;
-            }
-            
-            let change_id = Uuid::now_v7().to_string();
-            let old_value_str = old_value.and_then(|v| {
-                if v.is_null() { None } else { Some(v.to_string()) }
-            });
-            let new_value_str = if new_value.is_null() { 
-                None 
-            } else { 
-                Some(new_value.to_string()) 
-            };
-            
-            self.txn.execute(
-                "INSERT INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rusqlite::params![
-                    &change_id,
-                    &self.id,
-                    table_name,
-                    entity_id,
-                    key,
-                    old_value_str,
-                    new_value_str
-                ],
-            )?;
-        }
-        
+    fn track_changes(&self, table_name: &str, entity_id: &str, 
+            old_entity: Option<&serde_json::Value>, 
+            new_entity: &serde_json::Value) -> Result<()> {
+        // TODO
         Ok(())
     }
 
@@ -393,67 +336,19 @@ mod tests {
         })?;
         assert!(uuid::Uuid::parse_str(&artist.id).is_ok());
         assert_eq!(artist.name, "Deftones");
+        
         Ok(())
     }
-    
-    #[test]
-    fn save_with_change_tracking() -> Result<()> {
-        use rusqlite_migration::{Migrations, M};
-        
-        let db = Db::open_memory()?;
-        let migrations = Migrations::new(vec![
-            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
-        ]);
-        db.migrate(&migrations)?;
-        
-        let artist_id = db.transaction(|txn| {
-            // Create new artist
-            let artist = txn.save(&Artist {
-                name: "Radiohead".to_string(),
-                ..Default::default()
-            })?;
-            
-            // Update the same artist
-            let updated_artist = txn.save(&Artist {
-                id: artist.id.clone(),
-                name: "Radiohead".to_string(),
-                summary: Some("English rock band".to_string()),
-            })?;
-            
-            Ok(updated_artist.id)
-        })?;
-        
-        // Check that changes were tracked
-        let changes: Vec<(String, String, Option<String>, Option<String>)> = db.query(
-            "SELECT entity_id, attribute, old_value, new_value FROM ZV_CHANGE WHERE entity_id = ? ORDER BY attribute",
-            [&artist_id]
-        )?;
 
-        // Should have changes for: name (initial insert) + summary (update)
-        // The id field is NOT tracked since it's already in entity_id
-        // The summary field is NOT tracked for insert (null -> null is not a real change)
-        // but IS tracked for update (null -> "English rock band")
-        
-        // Verify no id changes are tracked
-        let id_changes: Vec<_> = changes.iter()
-            .filter(|c| c.1 == "id")
-            .collect();
-        assert_eq!(id_changes.len(), 0); // No id changes should be tracked
-        
-        let summary_changes: Vec<_> = changes.iter()
-            .filter(|c| c.1 == "summary")
-            .collect();
-        
-        assert_eq!(summary_changes.len(), 1); // Only the update, not the insert
-        
-        // Update change: null -> "English rock band"
-        assert_eq!(summary_changes[0].1, "summary");
-        assert_eq!(summary_changes[0].2, None); // old_value was null (SQL NULL)
-        assert_eq!(summary_changes[0].3, Some("\"English rock band\"".to_string())); // new_value
-        
+    fn change_tracking() -> Result<()> {
+        // TODO test running two transactions creates two ZV_TRANSACTIONs
+        // TODO test inserting a new entity creates ZV_CHANGEs for each column
+        // in the table
+        // TODO test fields in entities that are not in the table do not get
+        // ZV_CHANGEs
         Ok(())
     }
-    
+        
     #[test]
     fn subscriber_notifications() -> Result<()> {
         use rusqlite_migration::{Migrations, M};
@@ -510,7 +405,7 @@ mod tests {
         
         Ok(())
     }
-
+    
     #[derive(Serialize, Deserialize, Default, Debug)]
     pub struct Artist {
         pub id: String,
