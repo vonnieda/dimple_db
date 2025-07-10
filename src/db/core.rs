@@ -73,24 +73,25 @@ impl Db {
         self.transaction(|t| t.save(entity))
     }
 
-    /// Shortcut to create a transaction execute a query.
+    /// Shortcut to create a transaction and execute a query.
     /// See DbTransaction.query()
-    /// TODO In (near) future, don't create a transaction, just use a read only
-    /// connection.
+    /// TODO In the (near) future, don't create a transaction, just use a read
+    /// only connection.
     pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<T>> {
         self.transaction(|t| t.query(sql, params))
     }
 
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query
-    /// changes. Returns a QuerySubscription automatically unsubscribes the
-    /// query on drop or on QuerySubscription.unsubscribe().
+    /// changes. Returns a QuerySubscription that automatically unsubscribes the
+    /// query on drop or via QuerySubscription.unsubscribe().
     pub fn query_subscribe<T: Entity, P: Params, F>(&self, sql: &str, params: P, f: F) -> Result<QuerySubscription> 
         where F: FnMut(Vec<T>) -> () {
         // run an explain query plan and extract names of tables that the query depends on
         // create a thread and subscribe to changes on the database
         // whenever a change that would affect one of the dependent tables happens
         // re-run the query and call the callback with the results
+        // insight: we'll need to store the query and params in the subscription
         todo!()
     } 
 
@@ -191,32 +192,36 @@ pub struct DbTransaction<'a> {
 }
 
 impl <'a> DbTransaction<'a> {
-    /// Saves the entity to the database. The entity's type name is used for the
-    /// table name, and the table columns are mapped to the entity fields using
-    /// serde_rusqlite. If an entity with the same id already exists it is
-    /// updated, otherwise a new entity is inserted with a new uuidv7 for it's
-    /// id. A diff between the old entity, if any, and the new is created and
+    /// Saves the entity to the database. 
+    /// 
+    /// The entity's type name is used for the table name, and the table
+    /// columns are mapped to the entity fields using serde_rusqlite. If an
+    /// entity with the same id already exists it is updated, otherwise a new
+    /// entity is inserted with a new uuidv7 for it's id. 
+    /// 
+    /// A diff between the old entity, if any, and the new is created and
     /// saved in the change tracking tables. Subscribers are then notified
     /// of the changes and the newly inserted or updated entity is returned.
+    /// 
+    /// Note that only fields present in both the table and entity are mapped.
     pub fn save<T: Entity>(&self, entity: &T) -> Result<T> {
         let table_name = self.db.table_name_for_type::<T>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
-        let mut entity_value = serde_json::to_value(entity)?;
-        
-        let entity_id = self.ensure_entity_id(&mut entity_value)?;
-        
-        // Get old entity for change tracking (returns None if entity doesn't exist)
+
+        let mut new_entity = serde_json::to_value(entity)?;
+        let entity_id = self.ensure_entity_id(&mut new_entity)?;        
         let old_entity = self.get_entity_by_id(&table_name, &entity_id)?;
         let exists = old_entity.is_some();
         
         if exists {
-            self.update_entity(&table_name, &column_names, &entity_value)?;
+            self.update_entity(&table_name, &column_names, &new_entity)?;
         } else {
-            self.insert_entity(&table_name, &column_names, &entity_value)?;
+            self.insert_entity(&table_name, &column_names, &new_entity)?;
         }
         
-        // Track changes and record transaction
-        self.track_changes(&table_name, &entity_id, old_entity.as_ref(), &entity_value)?;
+        // Track changes
+        self.track_changes(&table_name, &entity_id, old_entity.as_ref(), 
+            &new_entity, &column_names)?;
         
         // Notify subscribers
         let event = if exists {
@@ -226,7 +231,7 @@ impl <'a> DbTransaction<'a> {
         };
         self.db.notify_subscribers(event);
         
-        serde_json::from_value(entity_value).map_err(Into::into)
+        serde_json::from_value(new_entity).map_err(Into::into)
     }
     
     fn ensure_entity_id(&self, entity_value: &mut serde_json::Value) -> Result<String> {
@@ -275,16 +280,91 @@ impl <'a> DbTransaction<'a> {
         Ok(())
     }
     
+    // TODO this entire thing is sus
     fn get_entity_by_id(&self, table_name: &str, entity_id: &str) -> Result<Option<serde_json::Value>> {
+        let column_names = self.db.table_column_names(self.txn, table_name)?;
         let sql = format!("SELECT * FROM {} WHERE id = ?", table_name);
-        let results: Vec<serde_json::Value> = self.query(&sql, [entity_id])?;
-        Ok(results.into_iter().next())
+        let mut stmt = self.txn.prepare(&sql)?;
+        
+        let mut rows = stmt.query([entity_id])?;
+        if let Some(row) = rows.next()? {
+            let mut entity = serde_json::Map::new();
+            for (i, column_name) in column_names.iter().enumerate() {
+                let value: Option<String> = row.get(i)?;
+                entity.insert(
+                    column_name.clone(), 
+                    match value {
+                        Some(val) => serde_json::Value::String(val),
+                        None => serde_json::Value::Null,
+                    }
+                );
+            }
+            Ok(Some(serde_json::Value::Object(entity)))
+        } else {
+            Ok(None)
+        }
     }
     
     fn track_changes(&self, table_name: &str, entity_id: &str, 
             old_entity: Option<&serde_json::Value>, 
-            new_entity: &serde_json::Value) -> Result<()> {
-        // TODO
+            new_entity: &serde_json::Value,
+            column_names: &[String]) -> Result<()> {
+        
+        
+        // First, ensure we have a transaction record
+        self.txn.execute(
+            "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
+            [&self.id, "system"]
+        )?;
+        
+        // Track changes for each column (except id)
+        for column_name in column_names {
+            if column_name == "id" {
+                continue;
+            }
+            
+            let old_value = old_entity
+                .and_then(|e| e.get(column_name))
+                .map(|v| match v {
+                    serde_json::Value::Null => None,
+                    _ => Some(v.to_string())
+                })
+                .flatten();
+                
+            let new_value = new_entity
+                .get(column_name)
+                .map(|v| match v {
+                    serde_json::Value::Null => None,
+                    _ => Some(v.to_string())
+                })
+                .flatten();
+            
+            // Track all values on insert, only changes on update
+            let is_insert = old_entity.is_none();
+            let should_track = is_insert || (old_value != new_value);
+            
+            
+            if should_track {
+                let change_id = Uuid::now_v7().to_string();
+                
+                let old_val_str = old_value.as_deref().unwrap_or("NULL");
+                let new_val_str = new_value.as_deref().unwrap_or("NULL");
+                
+                self.txn.execute(
+                    "INSERT INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        &change_id,
+                        &self.id,
+                        table_name,
+                        entity_id,
+                        column_name,
+                        old_val_str,
+                        new_val_str,
+                    ]
+                )?;
+            }
+        }
+        
         Ok(())
     }
 
@@ -340,12 +420,93 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn change_tracking() -> Result<()> {
-        // TODO test running two transactions creates two ZV_TRANSACTIONs
-        // TODO test inserting a new entity creates ZV_CHANGEs for each column
-        // in the table
-        // TODO test fields in entities that are not in the table do not get
-        // ZV_CHANGEs
+        use rusqlite_migration::{Migrations, M};
+        
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+
+        // Test 1: Insert new entity creates ZV_CHANGEs for each column (except id)
+        let artist_id = db.transaction(|txn| {
+            let artist = txn.save(&Artist {
+                name: "Radiohead".to_string(),
+                summary: Some("English rock band".to_string()),
+                ..Default::default()
+            })?;
+            Ok(artist.id)
+        })?;
+
+        // Check that a transaction was created
+        let txn_count: i64 = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare("SELECT COUNT(*) FROM ZV_TRANSACTION")?;
+            let count = stmt.query_row([], |row| row.get(0))?;
+            Ok(count)
+        })?;
+        assert_eq!(txn_count, 1);
+
+        // Check that changes were recorded for name and summary (but not id)
+        let changes: Vec<(String, String, String, String)> = db.transaction(|txn| {
+            txn.query("SELECT attribute, old_value, new_value, entity_id FROM ZV_CHANGE ORDER BY attribute", [])
+        })?;
+        
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].0, "name"); // attribute
+        assert_eq!(changes[0].1, "NULL"); // old_value
+        assert_eq!(changes[0].2, "\"Radiohead\""); // new_value
+        assert_eq!(changes[0].3, artist_id); // entity_id
+        
+        assert_eq!(changes[1].0, "summary"); // attribute
+        assert_eq!(changes[1].1, "NULL"); // old_value
+        assert_eq!(changes[1].2, "\"English rock band\""); // new_value
+        assert_eq!(changes[1].3, artist_id); // entity_id
+
+        // Test 2: Update entity creates changes only for modified fields
+        db.transaction(|txn| {
+            txn.save(&Artist {
+                id: artist_id.clone(),
+                name: "Radiohead".to_string(), // unchanged
+                summary: Some("Alternative rock band".to_string()), // changed
+            })?;
+            Ok(())
+        })?;
+
+        // Should now have 2 transactions
+        let txn_count: i64 = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare("SELECT COUNT(*) FROM ZV_TRANSACTION")?;
+            let count = stmt.query_row([], |row| row.get(0))?;
+            Ok(count)
+        })?;
+        assert_eq!(txn_count, 2);
+
+        // Should have 3 total changes (2 from insert + 1 from update)
+        let change_count: i64 = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare("SELECT COUNT(*) FROM ZV_CHANGE")?;
+            let count = stmt.query_row([], |row| row.get(0))?;
+            Ok(count)
+        })?;
+        assert_eq!(change_count, 3);
+
+        // Check the latest change is for summary
+        let latest_change: (String, String, String) = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare("SELECT attribute, old_value, new_value FROM ZV_CHANGE ORDER BY id DESC LIMIT 1")?;
+            let row = stmt.query_row([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?
+                ))
+            })?;
+            Ok(row)
+        })?;
+        
+        assert_eq!(latest_change.0, "summary");
+        assert_eq!(latest_change.1, "\"English rock band\"");
+        assert_eq!(latest_change.2, "\"Alternative rock band\"");
+
         Ok(())
     }
         
