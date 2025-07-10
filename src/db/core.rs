@@ -81,6 +81,10 @@ impl Db {
         self.transaction(|t| t.query(sql, params))
     }
 
+    pub fn get<E: Entity>(&self, id: &str) -> Result<Option<E>> {
+        self.transaction(|t| t.get(id))
+    }
+
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query
     /// changes. Returns a QuerySubscription that automatically unsubscribes the
@@ -204,8 +208,8 @@ impl <'a> DbTransaction<'a> {
     /// of the changes and the newly inserted or updated entity is returned.
     /// 
     /// Note that only fields present in both the table and entity are mapped.
-    pub fn save<T: Entity>(&self, entity: &T) -> Result<T> {
-        let table_name = self.db.table_name_for_type::<T>()?;
+    pub fn save<E: Entity>(&self, entity: &E) -> Result<E> {
+        let table_name = self.db.table_name_for_type::<E>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
 
         let mut new_entity = serde_json::to_value(entity)?;
@@ -242,9 +246,11 @@ impl <'a> DbTransaction<'a> {
     }
 
     pub fn get<E: Entity>(&self, id: &str) -> Result<Option<E>> {
-        todo!()
+        let table_name = self.db.table_name_for_type::<E>()?;
+        let sql = format!("SELECT * FROM {} WHERE id = ? LIMIT 1", table_name);
+        Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
-    
+
     fn ensure_entity_id(&self, entity_value: &mut serde_json::Value) -> Result<String> {
         match entity_value.get("id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => Ok(id.to_string()),
@@ -323,7 +329,7 @@ impl <'a> DbTransaction<'a> {
             new_entity: &serde_json::Value,
             column_names: &[String]) -> Result<()> {
         
-        
+    
         // First, ensure we have a transaction record
         self.txn.execute(
             "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
@@ -336,6 +342,7 @@ impl <'a> DbTransaction<'a> {
                 continue;
             }
             
+            // TODO check what's going on with this null stuff
             let old_value = old_entity
                 .and_then(|e| e.get(column_name))
                 .map(|v| match v {
@@ -422,6 +429,39 @@ mod tests {
         assert!(uuid::Uuid::parse_str(&artist.id).is_ok());
         assert_eq!(artist.name, "Deftones");
         
+        // Verify that both saves happened in the same transaction
+        let transaction_ids: Vec<String> = db.transaction(|txn| {
+            txn.query("SELECT DISTINCT transaction_id FROM ZV_CHANGE WHERE entity_id = ?", [&artist.id])
+        })?;
+        
+        // Should have exactly one transaction_id for all changes to this entity
+        assert_eq!(transaction_ids.len(), 1, "All changes should belong to the same transaction");
+        
+        // Verify we have the expected number of changes (name field changed from "" to "Deftones")
+        let change_count: i64 = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare("SELECT COUNT(*) FROM ZV_CHANGE WHERE entity_id = ?")?;
+            let count = stmt.query_row([&artist.id], |row| row.get(0))?;
+            Ok(count)
+        })?;
+        
+        // Should have 3 changes: 
+        // 1. Initial insert: name (NULL -> "")
+        // 2. Initial insert: summary (NULL -> NULL) 
+        // 3. Update: name ("" -> "Deftones")
+        assert_eq!(change_count, 3, "Should have 3 changes tracked for this entity");
+        
+        // Most importantly: verify that the name field has 2 changes with the same transaction_id
+        let name_changes: Vec<(String, String, String)> = db.transaction(|txn| {
+            txn.query("SELECT transaction_id, old_value, new_value FROM ZV_CHANGE WHERE entity_id = ? AND attribute = 'name' ORDER BY id", [&artist.id])
+        })?;
+        
+        assert_eq!(name_changes.len(), 2, "Should have 2 changes to the name field");
+        assert_eq!(name_changes[0].0, name_changes[1].0, "Both name changes should have the same transaction_id");
+        assert_eq!(name_changes[0].1, "NULL", "First change should be from NULL");
+        assert_eq!(name_changes[0].2, "\"\"", "First change should be to empty string");
+        assert_eq!(name_changes[1].1, "\"\"", "Second change should be from empty string");
+        assert_eq!(name_changes[1].2, "\"Deftones\"", "Second change should be to 'Deftones'");
+        
         Ok(())
     }
 
@@ -436,14 +476,11 @@ mod tests {
         db.migrate(&migrations)?;
 
         // Test 1: Insert new entity creates ZV_CHANGEs for each column (except id)
-        let artist_id = db.transaction(|txn| {
-            let artist = txn.save(&Artist {
-                name: "Radiohead".to_string(),
-                summary: Some("English rock band".to_string()),
-                ..Default::default()
-            })?;
-            Ok(artist.id)
-        })?;
+        let artist_id = db.save(&Artist {
+            name: "Radiohead".to_string(),
+            summary: Some("English rock band".to_string()),
+            ..Default::default()
+        })?.id;
 
         // Check that a transaction was created
         let txn_count: i64 = db.transaction(|txn| {
@@ -470,13 +507,10 @@ mod tests {
         assert_eq!(changes[1].3, artist_id); // entity_id
 
         // Test 2: Update entity creates changes only for modified fields
-        db.transaction(|txn| {
-            txn.save(&Artist {
-                id: artist_id.clone(),
-                name: "Radiohead".to_string(), // unchanged
-                summary: Some("Alternative rock band".to_string()), // changed
-            })?;
-            Ok(())
+        db.save(&Artist {
+            id: artist_id.clone(),
+            name: "Radiohead".to_string(), // unchanged
+            summary: Some("Alternative rock band".to_string()), // changed
         })?;
 
         // Should now have 2 transactions
@@ -514,6 +548,40 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn get_entity() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Save an artist
+        let saved_artist = db.save(&Artist {
+            name: "The Beatles".to_string(),
+            summary: Some("British rock band".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Test getting an existing entity
+        let retrieved_artist: Option<Artist> = db.get(&saved_artist.id)?;
+        
+        assert!(retrieved_artist.is_some());
+        let artist = retrieved_artist.unwrap();
+        assert_eq!(artist.id, saved_artist.id);
+        assert_eq!(artist.name, "The Beatles");
+        assert_eq!(artist.summary, Some("British rock band".to_string()));
+        
+        // Test getting a non-existent entity
+        let non_existent: Option<Artist> = db.get("non-existent-id")?;
+        
+        assert!(non_existent.is_none());
+        
+        Ok(())
+    }
         
     #[test]
     fn subscriber_notifications() -> Result<()> {
@@ -531,13 +599,10 @@ mod tests {
         let receiver = db.subscribe();
         
         // Create an artist (should trigger Insert event)
-        let artist_id = db.transaction(|txn| {
-            let artist = txn.save(&Artist {
-                name: "Radiohead".to_string(),
-                ..Default::default()
-            })?;
-            Ok(artist.id)
-        })?;
+        let artist_id = db.save(&Artist {
+            name: "Radiohead".to_string(),
+            ..Default::default()
+        })?.id;
         
         // Check for Insert event
         let event = receiver.recv_timeout(Duration::from_millis(100))?;
@@ -550,13 +615,10 @@ mod tests {
         }
         
         // Update the artist (should trigger Update event)
-        db.transaction(|txn| {
-            txn.save(&Artist {
-                id: artist_id.clone(),
-                name: "Radiohead".to_string(),
-                summary: Some("English rock band".to_string()),
-            })?;
-            Ok(())
+        db.save(&Artist {
+            id: artist_id.clone(),
+            name: "Radiohead".to_string(),
+            summary: Some("English rock band".to_string()),
         })?;
         
         // Check for Update event
