@@ -3,6 +3,7 @@ use std::{sync::{mpsc::{self, Sender, Receiver}, Arc, RwLock, Mutex}};
 use anyhow::Result;
 use rusqlite::{functions::FunctionFlags, Connection, Params, Transaction};
 use rusqlite_migration::{Migrations};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::{query::QuerySubscription, Entity};
@@ -180,6 +181,25 @@ impl Db {
     }
 }
 
+/// Represents a transaction record in the ZV_TRANSACTION table
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangeTransaction {
+    pub id: String,
+    pub author: String,
+}
+
+/// Represents a change record in the ZV_CHANGE table
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChangeRecord {
+    pub id: String,
+    pub transaction_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub attribute: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
 /// Sent to subscribers whenever the database is changed. Each variant includes
 /// the entity_name and entity_id.
 #[derive(Clone, Debug)]
@@ -212,30 +232,35 @@ impl <'a> DbTransaction<'a> {
         let table_name = self.db.table_name_for_type::<E>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
 
-        let mut new_entity = serde_json::to_value(entity)?;
-        let entity_id = self.ensure_entity_id(&mut new_entity)?;        
-        let old_entity = self.get_entity_by_id(&table_name, &entity_id)?;
-        let exists = old_entity.is_some();
+        // Convert the entity to a JSON Value so we can manipulate it
+        // generically without needing more than Serialize.
+        let mut new_value = serde_json::to_value(entity)?;
+        let id = self.ensure_entity_id(&mut new_value)?;        
+        let old_value = self.get::<E>(&id)?
+            .and_then(|e| serde_json::to_value(e).ok());
+
+        let exists = old_value.is_some();
         
         if exists {
-            self.update_entity(&table_name, &column_names, &new_entity)?;
+            self.update_entity(&table_name, &column_names, &new_value)?;
         } else {
-            self.insert_entity(&table_name, &column_names, &new_entity)?;
+            self.insert_entity(&table_name, &column_names, &new_value)?;
         }
         
         // Track changes
-        self.track_changes(&table_name, &entity_id, old_entity.as_ref(), 
-            &new_entity, &column_names)?;
+        self.track_changes(&table_name, &id, old_value.as_ref(), 
+            &new_value, &column_names)?;
         
         // Notify subscribers
         let event = if exists {
-            DbEvent::Update(table_name.clone(), entity_id.clone())
+            DbEvent::Update(table_name.clone(), id.clone())
         } else {
-            DbEvent::Insert(table_name.clone(), entity_id.clone())
+            DbEvent::Insert(table_name.clone(), id.clone())
         };
         self.db.notify_subscribers(event);
         
-        serde_json::from_value(new_entity).map_err(Into::into)
+        self.get::<E>(&id)?
+            .ok_or_else(|| anyhow::anyhow!("Failed to retrieve saved entity"))    
     }
 
     pub fn query<E: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<E>> {
@@ -271,7 +296,7 @@ impl <'a> DbTransaction<'a> {
             .join(", ");
         
         let sql = format!("UPDATE {} SET {} WHERE id = :id", table_name, set_clause);
-        self.execute_with_named_params(&sql, entity_value)
+        self.execute_with_named_params(&sql, entity_value, column_names)
     }
     
     fn insert_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
@@ -287,43 +312,17 @@ impl <'a> DbTransaction<'a> {
             column_names.join(", "),
             placeholders
         );
-        self.execute_with_named_params(&sql, entity_value)
+        self.execute_with_named_params(&sql, entity_value, column_names)
     }
     
-    fn execute_with_named_params(&self, sql: &str, entity_value: &serde_json::Value) -> Result<()> {
+    fn execute_with_named_params(&self, sql: &str, entity_value: &serde_json::Value, column_names: &[String]) -> Result<()> {
         let mut stmt = self.txn.prepare(sql)?;
-        let params = serde_rusqlite::to_params_named(entity_value)?;
+        let str_refs: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
+        let params = serde_rusqlite::to_params_named_with_fields(entity_value, &str_refs)?;
         stmt.execute(params.to_slice().as_slice())?;
         Ok(())
     }
     
-    // TODO this entire thing is sus, what's with the filtering?
-    // it should just be query and return first
-    fn get_entity_by_id(&self, table_name: &str, entity_id: &str) -> Result<Option<serde_json::Value>> {
-        let column_names = self.db.table_column_names(self.txn, table_name)?;
-        let sql = format!("SELECT * FROM {} WHERE id = ?", table_name);
-        let mut stmt = self.txn.prepare(&sql)?;
-        
-        let mut rows = stmt.query([entity_id])?;
-        if let Some(row) = rows.next()? {
-            let mut entity = serde_json::Map::new();
-            for (i, column_name) in column_names.iter().enumerate() {
-                let value: Option<String> = row.get(i)?;
-                entity.insert(
-                    column_name.clone(), 
-                    match value {
-                        Some(val) => serde_json::Value::String(val),
-                        None => serde_json::Value::Null,
-                    }
-                );
-            }
-            Ok(Some(serde_json::Value::Object(entity)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // TODO rewrite
     fn track_changes(&self, table_name: &str, entity_id: &str, 
             old_entity: Option<&serde_json::Value>, 
             new_entity: &serde_json::Value,
@@ -342,7 +341,7 @@ impl <'a> DbTransaction<'a> {
                 continue;
             }
             
-            // TODO check what's going on with this null stuff
+            // Convert JSON null to None, other values to their string representation
             let old_value = old_entity
                 .and_then(|e| e.get(column_name))
                 .map(|v| match v {
@@ -365,20 +364,17 @@ impl <'a> DbTransaction<'a> {
             if should_track {
                 let change_id = Uuid::now_v7().to_string();
                 
-                // TODO why
-                let old_val_str = old_value.as_deref().unwrap_or("NULL");
-                let new_val_str = new_value.as_deref().unwrap_or("NULL");
-                
+                // Use rusqlite's support for Option to store NULL values properly
                 self.txn.execute(
                     "INSERT INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [
+                    rusqlite::params![
                         &change_id,
                         &self.id,
                         table_name,
                         entity_id,
                         column_name,
-                        old_val_str,
-                        new_val_str,
+                        old_value.as_deref(),
+                        new_value.as_deref(),
                     ]
                 )?;
             }
@@ -409,6 +405,11 @@ mod tests {
         assert!(db.table_name_for_type::<AlbumArtist>()? == "AlbumArtist");
         Ok(())
     }
+
+    // TODO test that structs with Optional fields store None values as SQL NULL
+    // in the database and change log.
+    // TODO test that multiple save() calls in a transaction create one transaction
+    // and multiple change records.
 
     #[test]
     fn save() -> Result<()> {
@@ -451,15 +452,15 @@ mod tests {
         assert_eq!(change_count, 3, "Should have 3 changes tracked for this entity");
         
         // Most importantly: verify that the name field has 2 changes with the same transaction_id
-        let name_changes: Vec<(String, String, String)> = db.transaction(|txn| {
+        let name_changes: Vec<(String, Option<String>, String)> = db.transaction(|txn| {
             txn.query("SELECT transaction_id, old_value, new_value FROM ZV_CHANGE WHERE entity_id = ? AND attribute = 'name' ORDER BY id", [&artist.id])
         })?;
         
         assert_eq!(name_changes.len(), 2, "Should have 2 changes to the name field");
         assert_eq!(name_changes[0].0, name_changes[1].0, "Both name changes should have the same transaction_id");
-        assert_eq!(name_changes[0].1, "NULL", "First change should be from NULL");
+        assert!(name_changes[0].1.is_none(), "First change should be from NULL");
         assert_eq!(name_changes[0].2, "\"\"", "First change should be to empty string");
-        assert_eq!(name_changes[1].1, "\"\"", "Second change should be from empty string");
+        assert_eq!(name_changes[1].1, Some("\"\"".to_string()), "Second change should be from empty string");
         assert_eq!(name_changes[1].2, "\"Deftones\"", "Second change should be to 'Deftones'");
         
         Ok(())
@@ -491,18 +492,18 @@ mod tests {
         assert_eq!(txn_count, 1);
 
         // Check that changes were recorded for name and summary (but not id)
-        let changes: Vec<(String, String, String, String)> = db.transaction(|txn| {
+        let changes: Vec<(String, Option<String>, String, String)> = db.transaction(|txn| {
             txn.query("SELECT attribute, old_value, new_value, entity_id FROM ZV_CHANGE ORDER BY attribute", [])
         })?;
         
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].0, "name"); // attribute
-        assert_eq!(changes[0].1, "NULL"); // old_value
+        assert!(changes[0].1.is_none()); // old_value should be NULL
         assert_eq!(changes[0].2, "\"Radiohead\""); // new_value
         assert_eq!(changes[0].3, artist_id); // entity_id
         
         assert_eq!(changes[1].0, "summary"); // attribute
-        assert_eq!(changes[1].1, "NULL"); // old_value
+        assert!(changes[1].1.is_none()); // old_value should be NULL
         assert_eq!(changes[1].2, "\"English rock band\""); // new_value
         assert_eq!(changes[1].3, artist_id); // entity_id
 
@@ -583,6 +584,270 @@ mod tests {
         Ok(())
     }
         
+    #[test]
+    fn extra_struct_fields_not_in_change_log() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        
+        let db = Db::open_memory()?;
+        // Create table with only id and name fields (no summary field)
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Save artist with a summary field that doesn't exist in the table
+        // The Artist struct has a summary field, but the table doesn't
+        let artist = db.save(&Artist {
+            name: "Tool".to_string(),
+            summary: Some("This field doesn't exist in the table".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Verify the artist was saved successfully
+        assert!(!artist.id.is_empty());
+        assert_eq!(artist.name, "Tool");
+        // The returned entity only has fields that exist in the table, so summary is None
+        assert_eq!(artist.summary, None);
+        
+        // Query all changes
+        let changes: Vec<(String, String)> = db.transaction(|txn| {
+            txn.query("SELECT attribute, new_value FROM ZV_CHANGE WHERE entity_id = ?", [&artist.id])
+        })?;
+        
+        // Should only have 1 change (for name), not for summary
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].0, "name");
+        assert_eq!(changes[0].1, "\"Tool\"");
+        
+        // Verify no change was recorded for the summary field
+        let summary_changes: Vec<String> = db.transaction(|txn| {
+            txn.query("SELECT attribute FROM ZV_CHANGE WHERE entity_id = ? AND attribute = 'summary'", [&artist.id])
+        })?;
+        assert!(summary_changes.is_empty(), "No changes should be recorded for fields not in the table");
+        
+        // Also test update scenario
+        db.save(&Artist {
+            id: artist.id.clone(),
+            name: "Tool".to_string(), // unchanged
+            summary: Some("Still not in table".to_string()), // this won't be saved
+        })?;
+        
+        // Should have no new changes since name didn't change and summary isn't in table
+        let all_changes: Vec<String> = db.transaction(|txn| {
+            txn.query("SELECT attribute FROM ZV_CHANGE WHERE entity_id = ?", [&artist.id])
+        })?;
+        assert_eq!(all_changes.len(), 1, "Should still only have the original name change");
+        
+        // Verify that when we read the entity back, the summary field is None
+        let retrieved: Option<Artist> = db.get(&artist.id)?;
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.name, "Tool");
+        assert_eq!(retrieved.summary, None, "Summary should be None when read from DB since column doesn't exist");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn change_log_null_values() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Save artist with NULL summary
+        let artist = db.save(&Artist {
+            name: "Nirvana".to_string(),
+            summary: None,
+            ..Default::default()
+        })?;
+        
+        // Query the raw change values to see how NULL is stored
+        let null_check: Vec<(Option<String>, Option<String>)> = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare(
+                "SELECT old_value, new_value FROM ZV_CHANGE WHERE entity_id = ? AND attribute = 'summary'"
+            )?;
+            let result = stmt.query_map([&artist.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+            Ok(result)
+        })?;
+        
+        assert_eq!(null_check.len(), 1);
+        
+        // Check if we're storing SQL NULL correctly
+        match &null_check[0] {
+            (old_val, new_val) => {
+                println!("Old value: {:?}", old_val);
+                println!("New value: {:?}", new_val);
+                
+                // These should be None (SQL NULL), not Some("NULL")
+                assert!(old_val.is_none(), 
+                    "Old value should be SQL NULL (None) but was {:?}", old_val);
+                assert!(new_val.is_none(), 
+                    "New value should be SQL NULL (None) but was {:?}", new_val);
+            }
+        }
+        
+        // Update to non-null value
+        db.save(&Artist {
+            id: artist.id.clone(),
+            name: "Nirvana".to_string(),
+            summary: Some("Grunge band".to_string()),
+        })?;
+        
+        // Check the update change
+        let update_change: Vec<(Option<String>, Option<String>)> = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare(
+                "SELECT old_value, new_value FROM ZV_CHANGE 
+                 WHERE entity_id = ? AND attribute = 'summary' 
+                 ORDER BY id DESC LIMIT 1"
+            )?;
+            let result = stmt.query_map([&artist.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+            Ok(result)
+        })?;
+        
+        assert_eq!(update_change.len(), 1);
+        match &update_change[0] {
+            (old_val, new_val) => {
+                // Old should be SQL NULL, new should be the JSON string
+                assert!(old_val.is_none(), 
+                    "Old value should be SQL NULL (None) but was {:?}", old_val);
+                assert!(new_val.is_some() && new_val.as_ref().unwrap() == "\"Grunge band\"", 
+                    "New value should be '\"Grunge band\"' but was {:?}", new_val);
+            }
+        }
+        
+        // Update back to NULL
+        db.save(&Artist {
+            id: artist.id.clone(),
+            name: "Nirvana".to_string(),
+            summary: None,
+        })?;
+        
+        // Check if NULL is stored correctly
+        let null_update: Vec<(Option<String>, Option<String>)> = db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare(
+                "SELECT old_value, new_value FROM ZV_CHANGE 
+                 WHERE entity_id = ? AND attribute = 'summary' 
+                 ORDER BY id DESC LIMIT 1"
+            )?;
+            let result = stmt.query_map([&artist.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+            Ok(result)
+        })?;
+        
+        match &null_update[0] {
+            (old_val, new_val) => {
+                // Old should be the JSON string, new should be SQL NULL
+                assert!(old_val.is_some() && old_val.as_ref().unwrap() == "\"Grunge band\"", 
+                    "Old value should be '\"Grunge band\"' but was {:?}", old_val);
+                assert!(new_val.is_none(), 
+                    "New value should be SQL NULL (None) but was {:?}", new_val);
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[test]
+    fn query_change_log_with_structs() -> Result<()> {
+        use rusqlite_migration::{Migrations, M};
+        use crate::db::core::{ChangeTransaction, ChangeRecord};
+        
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Save a new artist
+        let artist = db.save(&Artist {
+            name: "Pink Floyd".to_string(),
+            summary: Some("Progressive rock band".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Query transactions using the new struct and Db::query
+        let transactions: Vec<ChangeTransaction> = db.query(
+            "SELECT id, author FROM ZV_TRANSACTION ORDER BY id", 
+            []
+        )?;
+        
+        // Should have one transaction
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(transactions[0].author, "system");
+        assert!(uuid::Uuid::parse_str(&transactions[0].id).is_ok());
+        
+        // Query changes using the new struct and Db::query
+        let changes: Vec<ChangeRecord> = db.query(
+            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
+             FROM ZV_CHANGE 
+             WHERE entity_id = ? 
+             ORDER BY attribute",
+            [&artist.id]
+        )?;
+        
+        // Should have 2 changes (name and summary)
+        assert_eq!(changes.len(), 2);
+        
+        // Verify name change
+        let name_change = changes.iter().find(|c| c.attribute == "name").unwrap();
+        assert_eq!(name_change.entity_type, "Artist");
+        assert_eq!(name_change.entity_id, artist.id);
+        assert_eq!(name_change.old_value, None);
+        assert_eq!(name_change.new_value, Some("\"Pink Floyd\"".to_string()));
+        assert_eq!(name_change.transaction_id, transactions[0].id);
+        
+        // Verify summary change
+        let summary_change = changes.iter().find(|c| c.attribute == "summary").unwrap();
+        assert_eq!(summary_change.entity_type, "Artist");
+        assert_eq!(summary_change.entity_id, artist.id);
+        assert_eq!(summary_change.old_value, None);
+        assert_eq!(summary_change.new_value, Some("\"Progressive rock band\"".to_string()));
+        assert_eq!(summary_change.transaction_id, transactions[0].id);
+        
+        // Update the artist
+        db.save(&Artist {
+            id: artist.id.clone(),
+            name: "Pink Floyd".to_string(), // unchanged
+            summary: Some("Legendary progressive rock band".to_string()), // changed
+        })?;
+        
+        // Query all transactions again using Db::query
+        let all_transactions: Vec<ChangeTransaction> = db.query(
+            "SELECT id, author FROM ZV_TRANSACTION ORDER BY id", 
+            []
+        )?;
+        
+        // Should now have 2 transactions
+        assert_eq!(all_transactions.len(), 2);
+        
+        // Query only the changes from the update
+        let update_changes: Vec<ChangeRecord> = db.query(
+            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
+             FROM ZV_CHANGE 
+             WHERE entity_id = ? AND transaction_id = ?",
+            (&artist.id, &all_transactions[1].id)
+        )?;
+        
+        // Should have 1 change (only summary was updated)
+        assert_eq!(update_changes.len(), 1);
+        assert_eq!(update_changes[0].attribute, "summary");
+        assert_eq!(update_changes[0].old_value, Some("\"Progressive rock band\"".to_string()));
+        assert_eq!(update_changes[0].new_value, Some("\"Legendary progressive rock band\"".to_string()));
+        
+        Ok(())
+    }
+
     #[test]
     fn subscriber_notifications() -> Result<()> {
         use rusqlite_migration::{Migrations, M};
