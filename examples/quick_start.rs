@@ -3,6 +3,26 @@ use dimple_db::Db;
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct Artist {
+    pub id: String,
+    pub name: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct Album {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct AlbumArtist {
+    pub id: String,
+    pub album_id: String,
+    pub artist_id: String,
+}
+
 fn main() -> Result<()> {
     let migrations = Migrations::new(vec![
         M::up("
@@ -64,24 +84,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
-pub struct Artist {
-    pub id: String,
-    pub name: String,
-    pub summary: Option<String>,
+#[test]
+fn test_main() -> Result<()> {
+    main()
 }
-
-#[derive(Serialize, Deserialize, Default, Debug)]
-pub struct Album {
-    pub id: String,
-    pub title: String,
-}
-
-#[derive(Serialize, Deserialize, Default, Debug)]
-pub struct AlbumArtist {
-    pub id: String,
-    pub album_id: String,
-    pub artist_id: String,
-}
-
 

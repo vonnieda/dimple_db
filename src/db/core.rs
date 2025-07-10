@@ -233,6 +233,17 @@ impl <'a> DbTransaction<'a> {
         
         serde_json::from_value(new_entity).map_err(Into::into)
     }
+
+    pub fn query<E: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<E>> {
+        let mut stmt = self.txn.prepare(sql)?;
+        let entities = serde_rusqlite::from_rows::<E>(stmt.query(params)?)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(entities)
+    }
+
+    pub fn get<E: Entity>(&self, id: &str) -> Result<Option<E>> {
+        todo!()
+    }
     
     fn ensure_entity_id(&self, entity_value: &mut serde_json::Value) -> Result<String> {
         match entity_value.get("id").and_then(|v| v.as_str()) {
@@ -280,7 +291,8 @@ impl <'a> DbTransaction<'a> {
         Ok(())
     }
     
-    // TODO this entire thing is sus
+    // TODO this entire thing is sus, what's with the filtering?
+    // it should just be query and return first
     fn get_entity_by_id(&self, table_name: &str, entity_id: &str) -> Result<Option<serde_json::Value>> {
         let column_names = self.db.table_column_names(self.txn, table_name)?;
         let sql = format!("SELECT * FROM {} WHERE id = ?", table_name);
@@ -304,7 +316,8 @@ impl <'a> DbTransaction<'a> {
             Ok(None)
         }
     }
-    
+
+    // TODO rewrite
     fn track_changes(&self, table_name: &str, entity_id: &str, 
             old_entity: Option<&serde_json::Value>, 
             new_entity: &serde_json::Value,
@@ -342,11 +355,10 @@ impl <'a> DbTransaction<'a> {
             // Track all values on insert, only changes on update
             let is_insert = old_entity.is_none();
             let should_track = is_insert || (old_value != new_value);
-            
-            
             if should_track {
                 let change_id = Uuid::now_v7().to_string();
                 
+                // TODO why
                 let old_val_str = old_value.as_deref().unwrap_or("NULL");
                 let new_val_str = new_value.as_deref().unwrap_or("NULL");
                 
@@ -366,13 +378,6 @@ impl <'a> DbTransaction<'a> {
         }
         
         Ok(())
-    }
-
-    pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<T>> {
-        let mut stmt = self.txn.prepare(sql)?;
-        let entities = serde_rusqlite::from_rows::<T>(stmt.query(params)?)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(entities)
     }
 }
 
