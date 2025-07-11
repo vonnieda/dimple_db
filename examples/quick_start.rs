@@ -60,15 +60,16 @@ fn main() -> Result<()> {
 
     let db2 = Db::open_memory()?;
     db2.migrate(&migrations)?;
-    // TODO query_subscribe not yet implemented
-    // let sql = "SELECT Album.* FROM Album 
-    //     JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
-    //     JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
-    //     WHERE Artist.name = ?";
-    // let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
-    //     dbg!(albums);
-    // })?;
-    // // Subscription will live as long as _sub does.
+    
+    // Set up a reactive query subscription
+    let sql = "SELECT Album.* FROM Album 
+        JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
+        JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
+        WHERE Artist.name = ?";
+    let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
+        println!("Albums by Metallica: {:?}", albums);
+    })?;
+    // Subscription will live as long as _sub does.
 
 
     // TODO sync not yet implemented

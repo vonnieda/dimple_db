@@ -1,32 +1,116 @@
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Sender};
+use std::thread::{self, JoinHandle};
 use anyhow::Result;
 use rusqlite::Params;
 use rusqlite::{types::{Value, ToSql}};
-use crate::db::{Db, Entity};
+use crate::db::{Db, Entity, DbEvent};
 
 /// Handle returned to the user for managing a query subscription
-pub struct QuerySubscription<P: Params> {
+pub struct QuerySubscription<P: Params + Clone + Send + 'static> {
     db: Db,
     sql: String,
     params: P,
     dependent_tables: HashSet<String>,
-    // phantom_data: PhantomData<E>,
-    // callback: Box<dyn FnMut(Vec<E>) -> ()>,
+    stop_signal: Option<Sender<()>>,
+    thread_handle: Option<JoinHandle<()>>,
 }
 
-impl<P: Params> QuerySubscription<P> {
-    pub fn new<E: Entity, F: FnMut(Vec<E>) -> ()>(db: &Db, sql: &str, params: P, _callback: F) -> Result<Self> {        
-        let dependent_tables = QuerySubscription::<()>::extract_query_tables(sql, ())?;        
+impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
+    pub fn new<E: Entity + 'static, F>(db: &Db, sql: &str, params: P, callback: F) -> Result<Self> 
+    where 
+        F: FnMut(Vec<E>) + Send + 'static
+    {        
+        let dependent_tables = QuerySubscription::<()>::extract_query_tables(sql, ())?;
+        
+        // Wrap the callback in Arc<Mutex<>> for thread safety
+        let callback = Arc::new(Mutex::new(callback));
+        
+        // Run the query initially to provide immediate results
+        let initial_results: Vec<E> = db.query(sql, params.clone())?;
+        if let Ok(mut cb) = callback.lock() {
+            cb(initial_results);
+        }
+        
+        // Create stop signal channel
+        let (stop_tx, stop_rx) = channel::<()>();
+        
+        // Clone values needed for the thread
+        let db_clone = db.clone();
+        let sql_clone = sql.to_string();
+        let params_clone = params.clone();
+        let tables_clone = dependent_tables.clone();
+        let callback_clone = callback.clone();
+        
+        // Create the monitoring thread
+        let thread_handle = thread::spawn(move || {
+            let event_rx = db_clone.subscribe();
+            
+            loop {
+                // Check for stop signal
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                
+                // Check for database events (with timeout to allow periodic stop checks)
+                match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(event) => {
+                        // Check if this event affects our query
+                        let table_name = match &event {
+                            DbEvent::Insert(table, _) => table,
+                            DbEvent::Update(table, _) => table,
+                            DbEvent::Delete(table, _) => table,
+                        };
+                        
+                        if tables_clone.contains(table_name) {
+                            // Add a small delay to avoid database lock issues
+                            // TODO no!
+                            thread::sleep(std::time::Duration::from_millis(10));
+                            
+                            // Re-run the query
+                            match db_clone.query::<E, _>(sql_clone.as_str(), params_clone.clone()) {
+                                Ok(results) => {
+                                    if let Ok(mut cb) = callback_clone.lock() {
+                                        cb(results);
+                                    }
+                                },
+                                Err(e) => eprintln!("Error re-running query: {}", e),
+                            }
+                        }
+                    },
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Timeout is fine, just check stop signal again
+                        continue;
+                    },
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // Database subscription ended
+                        break;
+                    }
+                }
+            }
+        });
+        
         Ok(QuerySubscription {
             db: db.clone(),
             sql: sql.to_string(),
             params,
             dependent_tables,
+            stop_signal: Some(stop_tx),
+            thread_handle: Some(thread_handle),
         })
     }
 
-    pub fn unsubscribe(&self) {
-        // TODO: Implement unsubscribe logic
+    pub fn unsubscribe(&mut self) {
+        // Send stop signal to the thread
+        if let Some(stop_signal) = self.stop_signal.take() {
+            let _ = stop_signal.send(()); // Ignore error if receiver already dropped
+        }
+        
+        // Wait for the thread to finish
+        if let Some(handle) = self.thread_handle.take() {
+            let _ = handle.join(); // Ignore error if thread panicked
+        }
     }
 }
 
@@ -135,8 +219,8 @@ impl QuerySubscription<()> {
     }
 }
 
-impl<P: Params> Drop for QuerySubscription<P> {
-    fn drop (&mut self) {
+impl<P: Params + Clone + Send + 'static> Drop for QuerySubscription<P> {
+    fn drop(&mut self) {
         self.unsubscribe();
     }   
 }

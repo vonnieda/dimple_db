@@ -97,7 +97,10 @@ impl Db {
     /// that is really no big deal so don't sweat it.
     pub fn query_subscribe<E, P, F>(&self, sql: &str, params: P, f: F) 
         -> Result<QuerySubscription<P>> 
-        where E: Entity, P: Params, F: FnMut(Vec<E>) -> () {        
+        where 
+            E: Entity + 'static, 
+            P: Params + Clone + Send + 'static, 
+            F: FnMut(Vec<E>) + Send + 'static {
         QuerySubscription::new(self, sql, params, f)
     } 
 
@@ -633,16 +636,37 @@ mod tests {
     #[test]
     fn query_subscribe() -> Result<()> {
         let db = setup_db()?;
-        let (tx, rx) = channel::<()>();
-        let _subscription = db.query_subscribe("SELECT * FROM Artist", (), move |artists: Vec<Artist> | {
-            tx.send(()).unwrap();
-        });
-        let _artist = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
-        let _artist = db.save(&Artist { name: "Metallica".to_string(), ..Default::default() })?;
-        thread::sleep(Duration::from_millis(100));
-        // TODO should have 1 for the initial query, and 1 for each insert. 
-        // uncomment when working
-        // assert_eq!(rx.iter().count(), 3);
+        let (tx, rx) = channel::<Vec<Artist>>();
+        
+        let _subscription = db.query_subscribe(
+            "SELECT * FROM Artist", 
+            (), 
+            move |artists: Vec<Artist>| {
+                tx.send(artists).unwrap();
+            }
+        )?;
+        
+        // Should get initial results (empty)
+        let initial_results = rx.recv_timeout(Duration::from_secs(1))?;
+        assert_eq!(initial_results.len(), 0);
+        
+        // Insert first artist
+        let _artist1 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+        thread::sleep(Duration::from_millis(200)); // Give time for the event to propagate
+        
+        // Should get updated results with 1 artist
+        let results_after_first = rx.recv_timeout(Duration::from_secs(1))?;
+        assert_eq!(results_after_first.len(), 1);
+        assert_eq!(results_after_first[0].name, "Pink Floyd");
+        
+        // Insert second artist
+        let _artist2 = db.save(&Artist { name: "Metallica".to_string(), ..Default::default() })?;
+        thread::sleep(Duration::from_millis(200)); // Give time for the event to propagate
+        
+        // Should get updated results with 2 artists
+        let results_after_second = rx.recv_timeout(Duration::from_secs(1))?;
+        assert_eq!(results_after_second.len(), 2);
+        
         Ok(())
     }
     
