@@ -4,17 +4,13 @@ use std::sync::mpsc::{channel, Sender};
 use std::thread::{self, JoinHandle};
 use anyhow::Result;
 use rusqlite::Params;
-use rusqlite::{types::{Value, ToSql}};
 use crate::db::{Db, Entity, DbEvent};
 
 /// Handle returned to the user for managing a query subscription
 pub struct QuerySubscription<P: Params + Clone + Send + 'static> {
-    db: Db,
-    sql: String,
-    params: P,
-    dependent_tables: HashSet<String>,
     stop_signal: Option<Sender<()>>,
     thread_handle: Option<JoinHandle<()>>,
+    _phantom: std::marker::PhantomData<P>,
 }
 
 impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
@@ -64,10 +60,6 @@ impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
                         };
                         
                         if tables_clone.contains(table_name) {
-                            // Add a small delay to avoid database lock issues
-                            // TODO no!
-                            thread::sleep(std::time::Duration::from_millis(10));
-                            
                             // Re-run the query
                             match db_clone.query::<E, _>(sql_clone.as_str(), params_clone.clone()) {
                                 Ok(results) => {
@@ -92,12 +84,9 @@ impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
         });
         
         Ok(QuerySubscription {
-            db: db.clone(),
-            sql: sql.to_string(),
-            params,
-            dependent_tables,
             stop_signal: Some(stop_tx),
             thread_handle: Some(thread_handle),
+            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -193,14 +182,11 @@ impl<P: Params + Clone + Send + 'static> Drop for QuerySubscription<P> {
     }   
 }
 
-impl Db {
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite_migration::{Migrations, M};
-    use rusqlite::types::ToSql;
     use serde::{Deserialize, Serialize};
 
     fn setup_db() -> Result<Db> {
@@ -214,7 +200,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_simple_select() -> Result<()> {
-        let db = setup_db()?;
         let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist WHERE id = ?", ["test_id"])?;
         assert_eq!(tables.len(), 1);
         assert!(tables.contains("Artist"));
@@ -267,8 +252,6 @@ mod tests {
     
     #[test]
     fn extract_query_tables_subquery() -> Result<()> {
-        let db = setup_db()?;
-        
         // Note: Our simple parser won't handle subqueries perfectly,
         // but it should at least find the main table
         let tables = QuerySubscription::extract_query_tables(
@@ -283,8 +266,6 @@ mod tests {
     // Unhappy path tests
     #[test]
     fn extract_query_tables_no_from_clause() -> Result<()> {
-        let db = setup_db()?;
-        
         // Query without FROM clause
         let tables = QuerySubscription::extract_query_tables("SELECT 1 + 1", [])?;
         assert_eq!(tables.len(), 0);
@@ -293,8 +274,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_malformed_sql() -> Result<()> {
-        let db = setup_db()?;
-        
         // Malformed SQL should not panic, just return empty or partial results
         let tables = QuerySubscription::extract_query_tables("SELECT * FORM Artist", [])?;
         assert_eq!(tables.len(), 0); // FORM instead of FROM
@@ -306,8 +285,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_special_characters() -> Result<()> {
-        let db = setup_db()?;
-        
         // Table names with special characters (though not recommended)
         let tables = QuerySubscription::extract_query_tables("SELECT * FROM `Artist-Table`", [])?;
         assert_eq!(tables.len(), 0); // Our parser expects alphanumeric names
@@ -320,8 +297,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_case_sensitivity() -> Result<()> {
-        let db = setup_db()?;
-        
         // Mixed case queries
         let tables = QuerySubscription::extract_query_tables("select * from Artist", [])?;
         assert!(tables.contains("Artist"));
@@ -336,8 +311,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_empty_and_whitespace() -> Result<()> {
-        let db = setup_db()?;
-        
         // Empty query
         let tables = QuerySubscription::extract_query_tables("", [])?;
         assert_eq!(tables.len(), 0);
@@ -354,8 +327,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_comments() -> Result<()> {
-        let db = setup_db()?;
-        
         // SQL comments (our simple parser doesn't handle these)
         let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist -- this is a comment",
@@ -377,8 +348,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_with_parentheses() -> Result<()> {
-        let db = setup_db()?;
-        
         // Tables in parentheses (common in complex queries)
         // NOTE: Our parser actually strips parentheses as punctuation, so it finds the table
         let tables = QuerySubscription::extract_query_tables(
@@ -401,8 +370,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_reserved_keywords() -> Result<()> {
-        let db = setup_db()?;
-        
         // Using a keyword that contains JOIN
         let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM JOINED_TABLE",
@@ -421,8 +388,6 @@ mod tests {
 
     #[test]
     fn extract_query_tables_comma_separated() -> Result<()> {
-        let db = setup_db()?;
-        
         // Comma-separated tables (old-style JOIN)
         let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",

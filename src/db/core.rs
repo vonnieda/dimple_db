@@ -20,6 +20,8 @@ impl Db {
         let manager = r2d2_sqlite::SqliteConnectionManager::memory();
         let pool = r2d2::Pool::builder()
             .connection_customizer(Box::new(DbConnectionCustomizer{}))
+            // https://beets.io/blog/sqlite-nightmare.html
+            .max_size(1)
             .build(manager)?;
         Self::from_pool(pool)
     }
@@ -28,8 +30,9 @@ impl Db {
         let manager = r2d2_sqlite::SqliteConnectionManager::file(path);
         let pool = r2d2::Pool::builder()
             .connection_customizer(Box::new(DbConnectionCustomizer{}))
+            // https://beets.io/blog/sqlite-nightmare.html
+            .max_size(1)
             .build(manager)?;
-
         Self::from_pool(pool)
     }
 
@@ -92,9 +95,8 @@ impl Db {
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query
     /// changes. Returns a QuerySubscription that automatically unsubscribes the
-    /// query on drop or via QuerySubscription.unsubscribe(). Note that each
-    /// subscription creates a thread in the current implementation and that
-    /// that is really no big deal so don't sweat it.
+    /// query on drop or via QuerySubscription.unsubscribe(). Each
+    /// subscription creates a monitoring thread that uses read-only queries.
     pub fn query_subscribe<E, P, F>(&self, sql: &str, params: P, f: F) 
         -> Result<QuerySubscription<P>> 
         where 
