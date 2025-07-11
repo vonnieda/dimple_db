@@ -5,10 +5,9 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{functions::FunctionFlags, Connection, Params, Transaction};
 use rusqlite_migration::{Migrations};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::db::{query::QuerySubscription, Entity};
+use crate::db::{query::QuerySubscription, types::DbEvent, Entity};
 
 #[derive(Clone)]
 pub struct Db {
@@ -82,8 +81,6 @@ impl Db {
 
     /// Shortcut to create a transaction and execute a query.
     /// See DbTransaction.query()
-    /// TODO In the (near) future, don't create a transaction, just use a read
-    /// only connection.
     pub fn query<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<T>> {
         self.transaction(|t| t.query(sql, params))
     }
@@ -183,33 +180,6 @@ impl Db {
     }
 }
 
-/// Represents a transaction record in the ZV_TRANSACTION table
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangeTransaction {
-    pub id: String,
-    pub author: String,
-}
-
-/// Represents a change record in the ZV_CHANGE table
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangeRecord {
-    pub id: String,
-    pub transaction_id: String,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub attribute: String,
-    pub old_value: Option<String>,
-    pub new_value: Option<String>,
-}
-
-/// Sent to subscribers whenever the database is changed. Each variant includes
-/// the entity_name and entity_id.
-#[derive(Clone, Debug)]
-pub enum DbEvent {
-    Insert(String, String),
-    Update(String, String),
-    Delete(String, String),
-}
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
@@ -414,7 +384,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::db::Db;
-    use crate::db::core::{ChangeTransaction, ChangeRecord, DbEvent};
+    use crate::db::types::{ChangeTransaction, ChangeRecord, DbEvent};
 
     fn setup_db() -> Result<Db> {
         let db = Db::open_memory()?;
@@ -661,6 +631,7 @@ mod tests {
         assert_eq!(changes[0].transaction_id, transactions[0].id);
         Ok(())
     }
+
     
     #[derive(Serialize, Deserialize, Default, Debug)]
     pub struct Artist {
