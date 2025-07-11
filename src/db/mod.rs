@@ -1,5 +1,6 @@
 pub mod core;
 pub mod query;
+pub mod transaction;
 pub mod types;
 
 pub use core::*;

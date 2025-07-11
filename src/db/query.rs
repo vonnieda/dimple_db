@@ -101,7 +101,6 @@ impl QuerySubscription {
     }
 }
 
-// Static methods 
 impl QuerySubscription {
     /// Extracts table names from a SQL query.
     /// Uses a simple regex-based approach to find table names in FROM and JOIN clauses.
