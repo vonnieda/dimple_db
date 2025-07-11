@@ -66,10 +66,14 @@ impl Db {
 
         let mut txn = conn.transaction()?;
         txn.set_drop_behavior(rusqlite::DropBehavior::Rollback);
-        let result = f(&DbTransaction::new(self, &txn))?;
-        txn.commit()?;
-
-        Ok(result)
+        let result = f(&DbTransaction::new(self, &txn));
+        if result.is_ok() {
+            txn.commit()?;
+        }
+        else {
+            txn.rollback()?;
+        }
+        result
     }
 
     /// Shortcut to create a transaction and save a single entity.
