@@ -1,6 +1,8 @@
-use std::{sync::{mpsc::{self, Sender, Receiver}, Arc, RwLock, Mutex}};
+use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
 
 use anyhow::Result;
+use r2d2::{CustomizeConnection, Pool};
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{functions::FunctionFlags, Connection, Params, Transaction};
 use rusqlite_migration::{Migrations};
 use serde::{Deserialize, Serialize};
@@ -10,26 +12,30 @@ use crate::db::{query::QuerySubscription, Entity};
 
 #[derive(Clone)]
 pub struct Db {
-    conn: Arc<RwLock<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
     subscribers: Arc<Mutex<Vec<Sender<DbEvent>>>>,
 }
 
 impl Db {
     pub fn open_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        Self::from_connection(conn)
+        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
+        let pool = r2d2::Pool::builder()
+            .connection_customizer(Box::new(DbConnectionCustomizer{}))
+            .build(manager)?;
+        Self::from_pool(pool)
     }
 
     pub fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(path);
+        let pool = r2d2::Pool::builder()
+            .connection_customizer(Box::new(DbConnectionCustomizer{}))
+            .build(manager)?;
+
+        Self::from_pool(pool)
     }
 
     pub fn migrate(&self, migrations: &Migrations) -> Result<()> {
-        let mut conn = self
-            .conn
-            .write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock for migration"))?;
+        let mut conn = self.pool.get()?;
 
         migrations.to_latest(&mut *conn)?;
 
@@ -54,10 +60,10 @@ impl Db {
     /// if the closure returns Ok, otherwise rolls back.
     pub fn transaction<F, R>(&self, f: F) -> Result<R>
         where F: FnOnce(&DbTransaction) -> Result<R> {
-        let mut conn = self.conn.write()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire write lock"))?;
+        let mut conn = self.pool.get()?;
 
-        let txn = conn.transaction()?;
+        let mut txn = conn.transaction()?;
+        txn.set_drop_behavior(rusqlite::DropBehavior::Rollback);
         let result = f(&DbTransaction { 
             db: self, 
             txn: &txn,
@@ -90,28 +96,24 @@ impl Db {
     /// immediately and then again any time any table referenced in the query
     /// changes. Returns a QuerySubscription that automatically unsubscribes the
     /// query on drop or via QuerySubscription.unsubscribe().
-    pub fn query_subscribe<T: Entity, P: Params, F>(&self, sql: &str, params: P, f: F) -> Result<QuerySubscription> 
+    pub fn query_subscribe<T: Entity, P: Params, F>(&self, _sql: &str, _params: P, _f: F) -> Result<QuerySubscription> 
         where F: FnMut(Vec<T>) -> () {
         // run an explain query plan and extract names of tables that the query depends on
         // create a thread and subscribe to changes on the database
         // whenever a change that would affect one of the dependent tables happens
         // re-run the query and call the callback with the results
         // insight: we'll need to store the query and params in the subscription
+        // we can use ToSql and FromSql to serialize them, but it might also be
+        // worth looking to see if there is a better way using serde or something.
         todo!()
     } 
 
-    fn from_connection(conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        
-        conn.create_scalar_function("uuid7", 0, FunctionFlags::SQLITE_UTF8, |_ctx| {
-            Ok(Uuid::now_v7().to_string())
-        })?;
-
+    fn from_pool(pool: Pool<SqliteConnectionManager>) -> Result<Self> {
+        let conn = pool.get()?;
         Self::init_change_tracking_tables(&conn)?;
 
         let db = Db {
-            conn: Arc::new(RwLock::new(conn)),
+            pool,
             subscribers: Arc::new(Mutex::new(Vec::new())),
         };
 
@@ -213,6 +215,19 @@ pub struct DbTransaction<'a> {
     db: &'a Db,
     txn: &'a Transaction<'a>,
     id: String,
+}
+
+#[derive(Debug)]
+struct DbConnectionCustomizer;
+impl CustomizeConnection<rusqlite::Connection, rusqlite::Error> for DbConnectionCustomizer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.create_scalar_function("uuid7", 0, FunctionFlags::SQLITE_UTF8, |_ctx| {
+            Ok(Uuid::now_v7().to_string())
+        })?;
+        Ok(())
+    }
 }
 
 impl <'a> DbTransaction<'a> {
