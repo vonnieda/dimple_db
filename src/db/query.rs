@@ -31,9 +31,22 @@ impl Db {
         if let Some(from_start) = sql_upper.find("FROM ") {
             let from_sql = &sql[from_start + 5..];
             
-            // Extract first table after FROM
-            if let Some(table_name) = self.extract_table_name(from_sql) {
-                tables.insert(table_name);
+            // Find the end of the FROM clause (before WHERE, JOIN, GROUP BY, etc.)
+            let end_keywords = ["WHERE ", "JOIN ", "LEFT JOIN ", "RIGHT JOIN ", "FULL JOIN ", "CROSS JOIN ", "INNER JOIN ", "GROUP BY ", "ORDER BY ", "HAVING ", "LIMIT "];
+            let mut end_pos = from_sql.len();
+            for keyword in &end_keywords {
+                if let Some(pos) = from_sql.to_uppercase().find(keyword) {
+                    end_pos = end_pos.min(pos);
+                }
+            }
+            
+            let from_clause = &from_sql[..end_pos];
+            
+            // Split by comma to handle multiple tables
+            for table_part in from_clause.split(',') {
+                if let Some(table_name) = self.extract_table_name(table_part.trim()) {
+                    tables.insert(table_name);
+                }
             }
         }
         
@@ -267,13 +280,14 @@ mod tests {
         assert_eq!(tables.len(), 1); // Parser strips parentheses and finds Artist
         assert!(tables.contains("Artist"));
         
-        // Without parentheses
+        // Comma-separated tables should now work
         let tables = db.extract_query_tables(
             "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
             []
         )?;
+        assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
-        // Note: Our parser currently doesn't handle comma-separated tables
+        assert!(tables.contains("Album"));
         Ok(())
     }
 
@@ -306,10 +320,51 @@ mod tests {
             "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
             []
         )?;
-        // NOTE: Our parser only finds the first table in comma-separated lists
-        assert_eq!(tables.len(), 1);
+        assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
-        // Would need to enhance parser to handle comma-separated tables
+        assert!(tables.contains("Album"));
+        
+        // Comma-separated tables with aliases
+        let tables = db.extract_query_tables(
+            "SELECT * FROM Artist a, Album al WHERE a.id = al.artist_id",
+            []
+        )?;
+        assert_eq!(tables.len(), 2);
+        assert!(tables.contains("Artist"));
+        assert!(tables.contains("Album"));
+        
+        // Multiple comma-separated tables
+        let tables = db.extract_query_tables(
+            "SELECT * FROM Artist, Album, Track WHERE Artist.id = Album.artist_id",
+            []
+        )?;
+        assert_eq!(tables.len(), 3);
+        assert!(tables.contains("Artist"));
+        assert!(tables.contains("Album"));
+        assert!(tables.contains("Track"));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_query_tables_mixed_comma_and_join() -> Result<()> {
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+            M::up("CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT NOT NULL, artist_id TEXT);"),
+            M::up("CREATE TABLE Track (id TEXT PRIMARY KEY, title TEXT NOT NULL, album_id TEXT);"),
+            M::up("CREATE TABLE Genre (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // Comma-separated tables with additional JOINs
+        let tables = db.extract_query_tables(
+            "SELECT * FROM Artist, Album JOIN Track ON Album.id = Track.album_id WHERE Artist.id = Album.artist_id",
+            []
+        )?;
+        assert_eq!(tables.len(), 3);
+        assert!(tables.contains("Artist"));
+        assert!(tables.contains("Album"));
+        assert!(tables.contains("Track"));
         Ok(())
     }
     
