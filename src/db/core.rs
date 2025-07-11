@@ -39,7 +39,7 @@ impl Db {
     pub fn migrate(&self, migrations: &Migrations) -> Result<()> {
         let mut conn = self.pool.get()?;
 
-        migrations.to_latest(&mut *conn)?;
+        migrations.to_latest(&mut conn)?;
 
         Ok(())
     }

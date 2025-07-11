@@ -154,19 +154,17 @@ impl<'a> DbTransaction<'a> {
             // Convert JSON null to None, other values to their string representation
             let old_value = old_entity
                 .and_then(|e| e.get(column_name))
-                .map(|v| match v {
+                .and_then(|v| match v {
                     serde_json::Value::Null => None,
                     _ => Some(v.to_string())
-                })
-                .flatten();
+                });
                 
             let new_value = new_entity
                 .get(column_name)
-                .map(|v| match v {
+                .and_then(|v| match v {
                     serde_json::Value::Null => None,
                     _ => Some(v.to_string())
-                })
-                .flatten();
+                });
             
             // Track all values on insert, only changes on update
             let is_insert = old_entity.is_none();
