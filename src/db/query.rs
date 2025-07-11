@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use anyhow::Result;
+use rusqlite::{types::{Value, ToSql}};
 use crate::db::Db;
 
 pub struct QuerySubscription {
@@ -19,6 +20,38 @@ impl Drop for QuerySubscription {
 }
 
 impl Db {
+    /// Converts common parameter types to a storable format (Vec<Value>) for later reuse
+    pub(crate) fn serialize_params<P: IntoIterator<Item = T>, T: ToSql>(&self, params: P) -> Result<Vec<Value>> {
+        let mut values = Vec::new();
+        
+        for param in params {
+            let sql_output = param.to_sql()?;
+            let stored_value = match sql_output {
+                rusqlite::types::ToSqlOutput::Borrowed(value_ref) => match value_ref {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(i) => Value::Integer(i),
+                    rusqlite::types::ValueRef::Real(r) => Value::Real(r),
+                    rusqlite::types::ValueRef::Text(t) => {
+                        Value::Text(String::from_utf8_lossy(t).to_string())
+                    }
+                    rusqlite::types::ValueRef::Blob(b) => Value::Blob(b.to_vec()),
+                },
+                rusqlite::types::ToSqlOutput::Owned(value) => value,
+                _ => return Err(anyhow::anyhow!("Unsupported ToSqlOutput variant")),
+            };
+            values.push(stored_value);
+        }
+        
+        Ok(values)
+    }
+
+    /// Converts stored Values back to a format that can be used as query parameters
+    pub(crate) fn deserialize_params(&self, values: &[Value]) -> Vec<Value> {
+        // Since Value already implements ToSql, we can just clone the values
+        // The caller will need to convert this to a slice or use params_from_iter
+        values.to_vec()
+    }
+
     /// Extracts table names from a SQL query.
     /// Uses a simple regex-based approach to find table names in FROM and JOIN clauses.
     pub(crate) fn extract_query_tables(&self, sql: &str, _params: impl rusqlite::Params) -> Result<HashSet<String>> {
@@ -93,6 +126,7 @@ impl Db {
 mod tests {
     use super::*;
     use rusqlite_migration::{Migrations, M};
+    use rusqlite::types::ToSql;
     use serde::{Deserialize, Serialize};
 
     fn setup_db() -> Result<Db> {
@@ -365,6 +399,177 @@ mod tests {
         assert!(tables.contains("Artist"));
         assert!(tables.contains("Album"));
         assert!(tables.contains("Track"));
+        Ok(())
+    }
+
+    // Parameter serialization tests
+    #[test]
+    fn serialize_params_empty() -> Result<()> {
+        let db = setup_db()?;
+        let empty_vec: Vec<&str> = vec![];
+        let values = db.serialize_params(empty_vec)?;
+        assert_eq!(values.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_params_various_types() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Test different parameter types
+        let params = vec!["text_param", "123", "45.67"];
+        let values = db.serialize_params(params)?;
+        
+        assert_eq!(values.len(), 3);
+        match &values[0] {
+            Value::Text(s) => assert_eq!(s, "text_param"),
+            _ => panic!("Expected text value"),
+        }
+        match &values[1] {
+            Value::Text(s) => assert_eq!(s, "123"),
+            _ => panic!("Expected text value"),
+        }
+        match &values[2] {
+            Value::Text(s) => assert_eq!(s, "45.67"),
+            _ => panic!("Expected text value"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_params_mixed_types() -> Result<()> {
+        use rusqlite::types::Null;
+        let db = setup_db()?;
+        
+        // Test with mixed types using Vec<Box<dyn ToSql>>
+        let params: Vec<Box<dyn ToSql>> = vec![
+            Box::new("text_value"),
+            Box::new(42i32),
+            Box::new(3.14f64),
+            Box::new(Null),
+        ];
+        let values = db.serialize_params(params)?;
+        
+        assert_eq!(values.len(), 4);
+        match &values[0] {
+            Value::Text(s) => assert_eq!(s, "text_value"),
+            _ => panic!("Expected text value"),
+        }
+        match &values[1] {
+            Value::Integer(i) => assert_eq!(*i, 42),
+            _ => panic!("Expected integer value"),
+        }
+        match &values[2] {
+            Value::Real(r) => assert!((r - 3.14).abs() < f64::EPSILON),
+            _ => panic!("Expected real value"),
+        }
+        match &values[3] {
+            Value::Null => {},
+            _ => panic!("Expected null value"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_deserialize_params_roundtrip() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Test round-trip with various types
+        let original_params: Vec<Box<dyn ToSql>> = vec![
+            Box::new("test_string"),
+            Box::new(42i32),
+            Box::new(3.14159f64),
+            Box::new(true),
+        ];
+        
+        // Serialize
+        let serialized = db.serialize_params(original_params)?;
+        
+        // Deserialize
+        let deserialized = db.deserialize_params(&serialized);
+        
+        // Check that we got the same values back
+        assert_eq!(serialized.len(), deserialized.len());
+        assert_eq!(serialized, deserialized);
+        Ok(())
+    }
+
+    #[test]
+    fn params_work_with_actual_query() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Insert test data
+        let artist = db.save(&Artist { 
+            name: "Test Artist".to_string(), 
+            ..Default::default() 
+        })?;
+        
+        // Test parameters that we'll serialize/deserialize
+        let original_params = vec!["Test Artist"];
+        
+        // Serialize parameters
+        let serialized = db.serialize_params(original_params)?;
+        
+        // Deserialize parameters
+        let deserialized = db.deserialize_params(&serialized);
+        
+        // Use the deserialized parameters in an actual query
+        let results: Vec<Artist> = db.query(
+            "SELECT * FROM Artist WHERE name = ?", 
+            rusqlite::params_from_iter(deserialized)
+        )?;
+        
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Test Artist");
+        assert_eq!(results[0].id, artist.id);
+        Ok(())
+    }
+
+    #[test]
+    fn params_handle_nulls_correctly() -> Result<()> {
+        use rusqlite::types::Null;
+        let db = setup_db()?;
+        
+        // Test with null values
+        let original_params: Vec<Box<dyn ToSql>> = vec![
+            Box::new("some_text"),
+            Box::new(Null),
+            Box::new(123i32),
+        ];
+        
+        // Serialize
+        let serialized = db.serialize_params(original_params)?;
+        
+        // Check that null is preserved
+        assert_eq!(serialized.len(), 3);
+        match &serialized[1] {
+            Value::Null => {}, // Expected
+            _ => panic!("Expected null value to be preserved"),
+        }
+        
+        // Deserialize
+        let deserialized = db.deserialize_params(&serialized);
+        
+        // Verify round-trip
+        assert_eq!(serialized, deserialized);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_params_work() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Test empty parameters
+        let empty_vec: Vec<&str> = vec![];
+        let serialized = db.serialize_params(empty_vec)?;
+        let deserialized = db.deserialize_params(&serialized);
+        
+        assert_eq!(serialized.len(), 0);
+        assert_eq!(deserialized.len(), 0);
+        
+        // Should work with queries that don't need parameters
+        let results: Vec<Artist> = db.query("SELECT * FROM Artist", rusqlite::params_from_iter(deserialized))?;
+        assert_eq!(results.len(), 0); // No data inserted yet
         Ok(())
     }
     
