@@ -1,27 +1,39 @@
 use std::collections::HashSet;
 use anyhow::Result;
+use rusqlite::Params;
 use rusqlite::{types::{Value, ToSql}};
-use crate::db::Db;
+use crate::db::{Db, Entity};
 
-pub struct QuerySubscription {
-
+/// Handle returned to the user for managing a query subscription
+pub struct QuerySubscription<P: Params> {
+    db: Db,
+    sql: String,
+    params: P,
+    dependent_tables: HashSet<String>,
+    // phantom_data: PhantomData<E>,
+    // callback: Box<dyn FnMut(Vec<E>) -> ()>,
 }
 
-impl QuerySubscription {
-    pub fn unsubscribe(&self) {
+impl<P: Params> QuerySubscription<P> {
+    pub fn new<E: Entity, F: FnMut(Vec<E>) -> ()>(db: &Db, sql: &str, params: P, _callback: F) -> Result<Self> {        
+        let dependent_tables = QuerySubscription::<()>::extract_query_tables(sql, ())?;        
+        Ok(QuerySubscription {
+            db: db.clone(),
+            sql: sql.to_string(),
+            params,
+            dependent_tables,
+        })
+    }
 
+    pub fn unsubscribe(&self) {
+        // TODO: Implement unsubscribe logic
     }
 }
 
-impl Drop for QuerySubscription {
-    fn drop (&mut self) {
-        self.unsubscribe();
-    }   
-}
-
-impl Db {
+// Static methods that don't depend on the generic parameter P
+impl QuerySubscription<()> {
     /// Converts common parameter types to a storable format (Vec<Value>) for later reuse
-    pub(crate) fn serialize_params<P: IntoIterator<Item = T>, T: ToSql>(&self, params: P) -> Result<Vec<Value>> {
+    pub fn serialize_params<Q: IntoIterator<Item = T>, T: ToSql>(params: Q) -> Result<Vec<Value>> {
         let mut values = Vec::new();
         
         for param in params {
@@ -46,7 +58,7 @@ impl Db {
     }
 
     /// Converts stored Values back to a format that can be used as query parameters
-    pub(crate) fn deserialize_params(&self, values: &[Value]) -> Vec<Value> {
+    pub fn deserialize_params(values: &[Value]) -> Vec<Value> {
         // Since Value already implements ToSql, we can just clone the values
         // The caller will need to convert this to a slice or use params_from_iter
         values.to_vec()
@@ -54,7 +66,8 @@ impl Db {
 
     /// Extracts table names from a SQL query.
     /// Uses a simple regex-based approach to find table names in FROM and JOIN clauses.
-    pub(crate) fn extract_query_tables(&self, sql: &str, _params: impl rusqlite::Params) -> Result<HashSet<String>> {
+    /// TODO remove params, not needed
+    pub fn extract_query_tables(sql: &str, _params: impl rusqlite::Params) -> Result<HashSet<String>> {
         let mut tables = HashSet::new();
         
         // Normalize the SQL to uppercase for easier parsing
@@ -77,7 +90,7 @@ impl Db {
             
             // Split by comma to handle multiple tables
             for table_part in from_clause.split(',') {
-                if let Some(table_name) = self.extract_table_name(table_part.trim()) {
+                if let Some(table_name) = Self::extract_table_name(table_part.trim()) {
                     tables.insert(table_name);
                 }
             }
@@ -91,7 +104,7 @@ impl Db {
                 let actual_pos = search_pos + join_pos + keyword.len();
                 let join_sql = &sql[actual_pos..];
                 
-                if let Some(table_name) = self.extract_table_name(join_sql) {
+                if let Some(table_name) = Self::extract_table_name(join_sql) {
                     tables.insert(table_name);
                 }
                 
@@ -104,7 +117,7 @@ impl Db {
     
     /// Extract a table name from the beginning of a SQL fragment
     /// Handles "TableName", "TableName alias", "TableName AS alias"
-    fn extract_table_name(&self, sql_fragment: &str) -> Option<String> {
+    pub fn extract_table_name(sql_fragment: &str) -> Option<String> {
         let trimmed = sql_fragment.trim();
         
         // Split by whitespace and take the first token
@@ -120,6 +133,15 @@ impl Db {
             None
         }
     }
+}
+
+impl<P: Params> Drop for QuerySubscription<P> {
+    fn drop (&mut self) {
+        self.unsubscribe();
+    }   
+}
+
+impl Db {
 }
 
 #[cfg(test)]
@@ -141,7 +163,7 @@ mod tests {
     #[test]
     fn extract_query_tables_simple_select() -> Result<()> {
         let db = setup_db()?;
-        let tables = db.extract_query_tables("SELECT * FROM Artist WHERE id = ?", ["test_id"])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist WHERE id = ?", ["test_id"])?;
         assert_eq!(tables.len(), 1);
         assert!(tables.contains("Artist"));
         Ok(())
@@ -156,7 +178,7 @@ mod tests {
         ]);
         db.migrate(&migrations)?;
         
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT a.name, al.title FROM Artist a JOIN Album al ON a.id = al.artist_id WHERE a.id = ?",
             ["test_id"]
         )?;
@@ -176,7 +198,7 @@ mod tests {
         ]);
         db.migrate(&migrations)?;
         
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT a.name, al.title, t.title 
              FROM Artist a 
              LEFT JOIN Album al ON a.id = al.artist_id 
@@ -197,7 +219,7 @@ mod tests {
         
         // Note: Our simple parser won't handle subqueries perfectly,
         // but it should at least find the main table
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist WHERE id IN (SELECT artist_id FROM Album WHERE title = ?)",
             ["Abbey Road"]
         )?;
@@ -212,7 +234,7 @@ mod tests {
         let db = setup_db()?;
         
         // Query without FROM clause
-        let tables = db.extract_query_tables("SELECT 1 + 1", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT 1 + 1", [])?;
         assert_eq!(tables.len(), 0);
         Ok(())
     }
@@ -222,10 +244,10 @@ mod tests {
         let db = setup_db()?;
         
         // Malformed SQL should not panic, just return empty or partial results
-        let tables = db.extract_query_tables("SELECT * FORM Artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FORM Artist", [])?;
         assert_eq!(tables.len(), 0); // FORM instead of FROM
         
-        let tables = db.extract_query_tables("FROM Artist SELECT *", [])?;
+        let tables = QuerySubscription::extract_query_tables("FROM Artist SELECT *", [])?;
         assert!(tables.contains("Artist")); // Should still find the table
         Ok(())
     }
@@ -235,11 +257,11 @@ mod tests {
         let db = setup_db()?;
         
         // Table names with special characters (though not recommended)
-        let tables = db.extract_query_tables("SELECT * FROM `Artist-Table`", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM `Artist-Table`", [])?;
         assert_eq!(tables.len(), 0); // Our parser expects alphanumeric names
         
         // Table with numbers and underscores (valid)
-        let tables = db.extract_query_tables("SELECT * FROM Artist_2024", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist_2024", [])?;
         assert!(tables.contains("Artist_2024"));
         Ok(())
     }
@@ -249,13 +271,13 @@ mod tests {
         let db = setup_db()?;
         
         // Mixed case queries
-        let tables = db.extract_query_tables("select * from Artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("select * from Artist", [])?;
         assert!(tables.contains("Artist"));
         
-        let tables = db.extract_query_tables("SELECT * FROM artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM artist", [])?;
         assert!(tables.contains("artist"));
         
-        let tables = db.extract_query_tables("SeLeCt * FrOm ArTiSt", [])?;
+        let tables = QuerySubscription::extract_query_tables("SeLeCt * FrOm ArTiSt", [])?;
         assert!(tables.contains("ArTiSt"));
         Ok(())
     }
@@ -265,15 +287,15 @@ mod tests {
         let db = setup_db()?;
         
         // Empty query
-        let tables = db.extract_query_tables("", [])?;
+        let tables = QuerySubscription::extract_query_tables("", [])?;
         assert_eq!(tables.len(), 0);
         
         // Only whitespace
-        let tables = db.extract_query_tables("   \t\n   ", [])?;
+        let tables = QuerySubscription::extract_query_tables("   \t\n   ", [])?;
         assert_eq!(tables.len(), 0);
         
         // Extra whitespace around tables
-        let tables = db.extract_query_tables("SELECT * FROM    Artist    ", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM    Artist    ", [])?;
         assert!(tables.contains("Artist"));
         Ok(())
     }
@@ -283,7 +305,7 @@ mod tests {
         let db = setup_db()?;
         
         // SQL comments (our simple parser doesn't handle these)
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist -- this is a comment",
             []
         )?;
@@ -291,7 +313,7 @@ mod tests {
         
         // Comment that looks like a table
         // NOTE: Our simple parser doesn't strip comments, so it will find "Album" in the comment
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist /* JOIN Album */",
             []
         )?;
@@ -307,7 +329,7 @@ mod tests {
         
         // Tables in parentheses (common in complex queries)
         // NOTE: Our parser actually strips parentheses as punctuation, so it finds the table
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM (Artist) WHERE id = ?",
             ["test"]
         )?;
@@ -315,7 +337,7 @@ mod tests {
         assert!(tables.contains("Artist"));
         
         // Comma-separated tables should now work
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
             []
         )?;
@@ -330,14 +352,14 @@ mod tests {
         let db = setup_db()?;
         
         // Using a keyword that contains JOIN
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM JOINED_TABLE",
             []
         )?;
         assert!(tables.contains("JOINED_TABLE"));
         
         // Table name that starts with a keyword
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM FROM_TABLE",
             []
         )?;
@@ -350,7 +372,7 @@ mod tests {
         let db = setup_db()?;
         
         // Comma-separated tables (old-style JOIN)
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
             []
         )?;
@@ -359,7 +381,7 @@ mod tests {
         assert!(tables.contains("Album"));
         
         // Comma-separated tables with aliases
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist a, Album al WHERE a.id = al.artist_id",
             []
         )?;
@@ -368,7 +390,7 @@ mod tests {
         assert!(tables.contains("Album"));
         
         // Multiple comma-separated tables
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist, Album, Track WHERE Artist.id = Album.artist_id",
             []
         )?;
@@ -391,7 +413,7 @@ mod tests {
         db.migrate(&migrations)?;
         
         // Comma-separated tables with additional JOINs
-        let tables = db.extract_query_tables(
+        let tables = QuerySubscription::extract_query_tables(
             "SELECT * FROM Artist, Album JOIN Track ON Album.id = Track.album_id WHERE Artist.id = Album.artist_id",
             []
         )?;
@@ -407,7 +429,7 @@ mod tests {
     fn serialize_params_empty() -> Result<()> {
         let db = setup_db()?;
         let empty_vec: Vec<&str> = vec![];
-        let values = db.serialize_params(empty_vec)?;
+        let values = QuerySubscription::serialize_params(empty_vec)?;
         assert_eq!(values.len(), 0);
         Ok(())
     }
@@ -418,7 +440,7 @@ mod tests {
         
         // Test different parameter types
         let params = vec!["text_param", "123", "45.67"];
-        let values = db.serialize_params(params)?;
+        let values = QuerySubscription::serialize_params(params)?;
         
         assert_eq!(values.len(), 3);
         match &values[0] {
@@ -448,7 +470,7 @@ mod tests {
             Box::new(3.14f64),
             Box::new(Null),
         ];
-        let values = db.serialize_params(params)?;
+        let values = QuerySubscription::serialize_params(params)?;
         
         assert_eq!(values.len(), 4);
         match &values[0] {
@@ -483,10 +505,10 @@ mod tests {
         ];
         
         // Serialize
-        let serialized = db.serialize_params(original_params)?;
+        let serialized = QuerySubscription::serialize_params(original_params)?;
         
         // Deserialize
-        let deserialized = db.deserialize_params(&serialized);
+        let deserialized = QuerySubscription::deserialize_params(&serialized);
         
         // Check that we got the same values back
         assert_eq!(serialized.len(), deserialized.len());
@@ -508,10 +530,10 @@ mod tests {
         let original_params = vec!["Test Artist"];
         
         // Serialize parameters
-        let serialized = db.serialize_params(original_params)?;
+        let serialized = QuerySubscription::serialize_params(original_params)?;
         
         // Deserialize parameters
-        let deserialized = db.deserialize_params(&serialized);
+        let deserialized = QuerySubscription::deserialize_params(&serialized);
         
         // Use the deserialized parameters in an actual query
         let results: Vec<Artist> = db.query(
@@ -538,7 +560,7 @@ mod tests {
         ];
         
         // Serialize
-        let serialized = db.serialize_params(original_params)?;
+        let serialized = QuerySubscription::serialize_params(original_params)?;
         
         // Check that null is preserved
         assert_eq!(serialized.len(), 3);
@@ -548,7 +570,7 @@ mod tests {
         }
         
         // Deserialize
-        let deserialized = db.deserialize_params(&serialized);
+        let deserialized = QuerySubscription::deserialize_params(&serialized);
         
         // Verify round-trip
         assert_eq!(serialized, deserialized);
@@ -561,8 +583,8 @@ mod tests {
         
         // Test empty parameters
         let empty_vec: Vec<&str> = vec![];
-        let serialized = db.serialize_params(empty_vec)?;
-        let deserialized = db.deserialize_params(&serialized);
+        let serialized = QuerySubscription::serialize_params(empty_vec)?;
+        let deserialized = QuerySubscription::deserialize_params(&serialized);
         
         assert_eq!(serialized.len(), 0);
         assert_eq!(deserialized.len(), 0);

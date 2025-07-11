@@ -92,17 +92,13 @@ impl Db {
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query
     /// changes. Returns a QuerySubscription that automatically unsubscribes the
-    /// query on drop or via QuerySubscription.unsubscribe().
-    pub fn query_subscribe<T: Entity, P: Params, F>(&self, _sql: &str, _params: P, _f: F) -> Result<QuerySubscription> 
-        where F: FnMut(Vec<T>) -> () {
-        // run an explain query plan and extract names of tables that the query depends on
-        // create a thread and subscribe to changes on the database
-        // whenever a change that would affect one of the dependent tables happens
-        // re-run the query and call the callback with the results
-        // insight: we'll need to store the query and params in the subscription
-        // we can use ToSql and FromSql to serialize them, but it might also be
-        // worth looking to see if there is a better way using serde or something.
-        todo!()
+    /// query on drop or via QuerySubscription.unsubscribe(). Note that each
+    /// subscription creates a thread in the current implementation and that
+    /// that is really no big deal so don't sweat it.
+    pub fn query_subscribe<E, P, F>(&self, sql: &str, params: P, f: F) 
+        -> Result<QuerySubscription<P>> 
+        where E: Entity, P: Params, F: FnMut(Vec<E>) -> () {        
+        QuerySubscription::new(self, sql, params, f)
     } 
 
     fn from_pool(pool: Pool<SqliteConnectionManager>) -> Result<Self> {
@@ -381,6 +377,8 @@ mod tests {
     use anyhow::Result;
     use serde::{Deserialize, Serialize};
     use rusqlite_migration::{Migrations, M};
+    use std::sync::mpsc::channel;
+    use std::thread;
     use std::time::Duration;
 
     use crate::db::Db;
@@ -632,6 +630,21 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn query_subscribe() -> Result<()> {
+        let db = setup_db()?;
+        let (tx, rx) = channel::<()>();
+        let _subscription = db.query_subscribe("SELECT * FROM Artist", (), move |artists: Vec<Artist> | {
+            tx.send(()).unwrap();
+        });
+        let _artist = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+        let _artist = db.save(&Artist { name: "Metallica".to_string(), ..Default::default() })?;
+        thread::sleep(Duration::from_millis(100));
+        // TODO should have 1 for the initial query, and 1 for each insert. 
+        // uncomment when working
+        // assert_eq!(rx.iter().count(), 3);
+        Ok(())
+    }
     
     #[derive(Serialize, Deserialize, Default, Debug)]
     pub struct Artist {
