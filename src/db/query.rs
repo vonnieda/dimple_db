@@ -7,18 +7,17 @@ use rusqlite::Params;
 use crate::db::{Db, Entity, DbEvent};
 
 /// Handle returned to the user for managing a query subscription
-pub struct QuerySubscription<P: Params + Clone + Send + 'static> {
+pub struct QuerySubscription {
     stop_signal: Option<Sender<()>>,
     thread_handle: Option<JoinHandle<()>>,
-    _phantom: std::marker::PhantomData<P>,
 }
 
-impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
-    pub fn new<E: Entity + 'static, F>(db: &Db, sql: &str, params: P, callback: F) -> Result<Self> 
+impl QuerySubscription {
+    pub fn new<E: Entity + 'static, P: Params + Clone + Send + 'static, F>(db: &Db, sql: &str, params: P, callback: F) -> Result<Self> 
     where 
         F: FnMut(Vec<E>) + Send + 'static
     {        
-        let dependent_tables = QuerySubscription::<()>::extract_query_tables(sql, ())?;
+        let dependent_tables = QuerySubscription::extract_query_tables(sql)?;
         
         // Wrap the callback in Arc<Mutex<>> for thread safety
         let callback = Arc::new(Mutex::new(callback));
@@ -86,7 +85,6 @@ impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
         Ok(QuerySubscription {
             stop_signal: Some(stop_tx),
             thread_handle: Some(thread_handle),
-            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -103,12 +101,11 @@ impl<P: Params + Clone + Send + 'static> QuerySubscription<P> {
     }
 }
 
-// Static methods that don't depend on the generic parameter P
-impl QuerySubscription<()> {
+// Static methods 
+impl QuerySubscription {
     /// Extracts table names from a SQL query.
     /// Uses a simple regex-based approach to find table names in FROM and JOIN clauses.
-    /// TODO remove params, not needed
-    pub fn extract_query_tables(sql: &str, _params: impl rusqlite::Params) -> Result<HashSet<String>> {
+    pub fn extract_query_tables(sql: &str) -> Result<HashSet<String>> {
         let mut tables = HashSet::new();
         
         // Normalize the SQL to uppercase for easier parsing
@@ -176,7 +173,7 @@ impl QuerySubscription<()> {
     }
 }
 
-impl<P: Params + Clone + Send + 'static> Drop for QuerySubscription<P> {
+impl Drop for QuerySubscription {
     fn drop(&mut self) {
         self.unsubscribe();
     }   
@@ -189,18 +186,10 @@ mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
 
-    fn setup_db() -> Result<Db> {
-        let db = Db::open_memory()?;
-        let migrations = Migrations::new(vec![
-            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
-        ]);
-        db.migrate(&migrations)?;
-        Ok(db)
-    }
 
     #[test]
     fn extract_query_tables_simple_select() -> Result<()> {
-        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist WHERE id = ?", ["test_id"])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist WHERE id = ?")?;
         assert_eq!(tables.len(), 1);
         assert!(tables.contains("Artist"));
         Ok(())
@@ -216,8 +205,7 @@ mod tests {
         db.migrate(&migrations)?;
         
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT a.name, al.title FROM Artist a JOIN Album al ON a.id = al.artist_id WHERE a.id = ?",
-            ["test_id"]
+            "SELECT a.name, al.title FROM Artist a JOIN Album al ON a.id = al.artist_id WHERE a.id = ?"
         )?;
         assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
@@ -240,9 +228,7 @@ mod tests {
              FROM Artist a 
              LEFT JOIN Album al ON a.id = al.artist_id 
              INNER JOIN Track t ON al.id = t.album_id 
-             WHERE a.name = ?",
-            ["Beatles"]
-        )?;
+             WHERE a.name = ?")?;
         assert_eq!(tables.len(), 3);
         assert!(tables.contains("Artist"));
         assert!(tables.contains("Album"));
@@ -255,8 +241,7 @@ mod tests {
         // Note: Our simple parser won't handle subqueries perfectly,
         // but it should at least find the main table
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist WHERE id IN (SELECT artist_id FROM Album WHERE title = ?)",
-            ["Abbey Road"]
+            "SELECT * FROM Artist WHERE id IN (SELECT artist_id FROM Album WHERE title = ?)"
         )?;
         assert!(tables.contains("Artist"));
         // Our simple parser might miss the subquery table
@@ -267,7 +252,7 @@ mod tests {
     #[test]
     fn extract_query_tables_no_from_clause() -> Result<()> {
         // Query without FROM clause
-        let tables = QuerySubscription::extract_query_tables("SELECT 1 + 1", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT 1 + 1")?;
         assert_eq!(tables.len(), 0);
         Ok(())
     }
@@ -275,10 +260,10 @@ mod tests {
     #[test]
     fn extract_query_tables_malformed_sql() -> Result<()> {
         // Malformed SQL should not panic, just return empty or partial results
-        let tables = QuerySubscription::extract_query_tables("SELECT * FORM Artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FORM Artist")?;
         assert_eq!(tables.len(), 0); // FORM instead of FROM
         
-        let tables = QuerySubscription::extract_query_tables("FROM Artist SELECT *", [])?;
+        let tables = QuerySubscription::extract_query_tables("FROM Artist SELECT *")?;
         assert!(tables.contains("Artist")); // Should still find the table
         Ok(())
     }
@@ -286,11 +271,11 @@ mod tests {
     #[test]
     fn extract_query_tables_special_characters() -> Result<()> {
         // Table names with special characters (though not recommended)
-        let tables = QuerySubscription::extract_query_tables("SELECT * FROM `Artist-Table`", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM `Artist-Table`")?;
         assert_eq!(tables.len(), 0); // Our parser expects alphanumeric names
         
         // Table with numbers and underscores (valid)
-        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist_2024", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM Artist_2024")?;
         assert!(tables.contains("Artist_2024"));
         Ok(())
     }
@@ -298,13 +283,13 @@ mod tests {
     #[test]
     fn extract_query_tables_case_sensitivity() -> Result<()> {
         // Mixed case queries
-        let tables = QuerySubscription::extract_query_tables("select * from Artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("select * from Artist")?;
         assert!(tables.contains("Artist"));
         
-        let tables = QuerySubscription::extract_query_tables("SELECT * FROM artist", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM artist")?;
         assert!(tables.contains("artist"));
         
-        let tables = QuerySubscription::extract_query_tables("SeLeCt * FrOm ArTiSt", [])?;
+        let tables = QuerySubscription::extract_query_tables("SeLeCt * FrOm ArTiSt")?;
         assert!(tables.contains("ArTiSt"));
         Ok(())
     }
@@ -312,15 +297,15 @@ mod tests {
     #[test]
     fn extract_query_tables_empty_and_whitespace() -> Result<()> {
         // Empty query
-        let tables = QuerySubscription::extract_query_tables("", [])?;
+        let tables = QuerySubscription::extract_query_tables("")?;
         assert_eq!(tables.len(), 0);
         
         // Only whitespace
-        let tables = QuerySubscription::extract_query_tables("   \t\n   ", [])?;
+        let tables = QuerySubscription::extract_query_tables("   \t\n   ")?;
         assert_eq!(tables.len(), 0);
         
         // Extra whitespace around tables
-        let tables = QuerySubscription::extract_query_tables("SELECT * FROM    Artist    ", [])?;
+        let tables = QuerySubscription::extract_query_tables("SELECT * FROM    Artist    ")?;
         assert!(tables.contains("Artist"));
         Ok(())
     }
@@ -329,16 +314,14 @@ mod tests {
     fn extract_query_tables_comments() -> Result<()> {
         // SQL comments (our simple parser doesn't handle these)
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist -- this is a comment",
-            []
+            "SELECT * FROM Artist -- this is a comment"
         )?;
         assert!(tables.contains("Artist"));
         
         // Comment that looks like a table
         // NOTE: Our simple parser doesn't strip comments, so it will find "Album" in the comment
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist /* JOIN Album */",
-            []
+            "SELECT * FROM Artist /* JOIN Album */"
         )?;
         assert_eq!(tables.len(), 2); // Finds both Artist and Album
         assert!(tables.contains("Artist"));
@@ -351,16 +334,14 @@ mod tests {
         // Tables in parentheses (common in complex queries)
         // NOTE: Our parser actually strips parentheses as punctuation, so it finds the table
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM (Artist) WHERE id = ?",
-            ["test"]
+            "SELECT * FROM (Artist) WHERE id = ?"
         )?;
         assert_eq!(tables.len(), 1); // Parser strips parentheses and finds Artist
         assert!(tables.contains("Artist"));
         
         // Comma-separated tables should now work
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
-            []
+            "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id"
         )?;
         assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
@@ -372,15 +353,13 @@ mod tests {
     fn extract_query_tables_reserved_keywords() -> Result<()> {
         // Using a keyword that contains JOIN
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM JOINED_TABLE",
-            []
+            "SELECT * FROM JOINED_TABLE"
         )?;
         assert!(tables.contains("JOINED_TABLE"));
         
         // Table name that starts with a keyword
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM FROM_TABLE",
-            []
+            "SELECT * FROM FROM_TABLE"
         )?;
         assert!(tables.contains("FROM_TABLE"));
         Ok(())
@@ -390,8 +369,7 @@ mod tests {
     fn extract_query_tables_comma_separated() -> Result<()> {
         // Comma-separated tables (old-style JOIN)
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id",
-            []
+            "SELECT * FROM Artist, Album WHERE Artist.id = Album.artist_id"
         )?;
         assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
@@ -399,8 +377,7 @@ mod tests {
         
         // Comma-separated tables with aliases
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist a, Album al WHERE a.id = al.artist_id",
-            []
+            "SELECT * FROM Artist a, Album al WHERE a.id = al.artist_id"
         )?;
         assert_eq!(tables.len(), 2);
         assert!(tables.contains("Artist"));
@@ -408,8 +385,7 @@ mod tests {
         
         // Multiple comma-separated tables
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist, Album, Track WHERE Artist.id = Album.artist_id",
-            []
+            "SELECT * FROM Artist, Album, Track WHERE Artist.id = Album.artist_id"
         )?;
         assert_eq!(tables.len(), 3);
         assert!(tables.contains("Artist"));
@@ -431,8 +407,7 @@ mod tests {
         
         // Comma-separated tables with additional JOINs
         let tables = QuerySubscription::extract_query_tables(
-            "SELECT * FROM Artist, Album JOIN Track ON Album.id = Track.album_id WHERE Artist.id = Album.artist_id",
-            []
+            "SELECT * FROM Artist, Album JOIN Track ON Album.id = Track.album_id WHERE Artist.id = Album.artist_id"
         )?;
         assert_eq!(tables.len(), 3);
         assert!(tables.contains("Artist"));

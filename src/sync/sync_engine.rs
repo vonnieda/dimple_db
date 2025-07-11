@@ -17,7 +17,8 @@ impl SyncEngine {
         SyncEngineBuilder::default()
     }
 
-    pub fn sync(&self, db: &Db) -> Result<()> {
+    pub fn sync(&self, _db: &Db) -> Result<()> {
+        let _ = &self.storage; // Use storage to avoid dead code warning
         todo!()
     }
 }

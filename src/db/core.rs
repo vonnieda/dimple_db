@@ -98,7 +98,7 @@ impl Db {
     /// query on drop or via QuerySubscription.unsubscribe(). Each
     /// subscription creates a monitoring thread that uses read-only queries.
     pub fn query_subscribe<E, P, F>(&self, sql: &str, params: P, f: F) 
-        -> Result<QuerySubscription<P>> 
+        -> Result<QuerySubscription> 
         where 
             E: Entity + 'static, 
             P: Params + Clone + Send + 'static, 
