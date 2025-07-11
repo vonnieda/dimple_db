@@ -66,9 +66,16 @@ impl Db {
 
         let mut txn = conn.transaction()?;
         txn.set_drop_behavior(rusqlite::DropBehavior::Rollback);
-        let result = f(&DbTransaction::new(self, &txn));
+        let db_txn = DbTransaction::new(self, &txn);
+        let result = f(&db_txn);
         if result.is_ok() {
+            // Collect events before committing
+            let pending_events = db_txn.take_pending_events();
             txn.commit()?;
+            // Notify subscribers only after successful commit
+            for event in pending_events {
+                self.notify_subscribers(event);
+            }
         }
         else {
             txn.rollback()?;
@@ -493,6 +500,129 @@ mod tests {
         // Should get updated results with 2 artists
         let results_after_second = rx.recv_timeout(Duration::from_secs(1))?;
         assert_eq!(results_after_second.len(), 2);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn notifications_dont_fire_on_rollback() -> Result<()> {
+        let db = setup_db()?;
+        let receiver = db.subscribe();
+        
+        // Attempt a transaction that will fail
+        let result = db.transaction(|t| -> Result<()> {
+            t.save(&Artist { name: "Will Be Rolled Back".to_string(), ..Default::default() })?;
+            // Force an error to trigger rollback
+            anyhow::bail!("Intentional error for rollback test");
+        });
+        
+        // Transaction should have failed
+        assert!(result.is_err());
+        
+        // Wait a bit to ensure no delayed notifications
+        thread::sleep(Duration::from_millis(100));
+        
+        // Should not receive any notifications since transaction rolled back
+        assert!(receiver.try_recv().is_err(), "Should not receive notification on rollback");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_database_operations_stress_test() -> Result<()> {
+        // Use a temporary file database instead of memory to avoid shared cache issues
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test_concurrent_{}.db", uuid::Uuid::now_v7()));
+        let db = Db::open(&db_path)?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT);"),
+        ]);
+        db.migrate(&migrations)?;
+        let num_threads = 10;
+        let operations_per_thread = 50;
+        
+        let mut handles = vec![];
+        
+        for thread_id in 0..num_threads {
+            let db_clone = db.clone();
+            let handle = thread::spawn(move || -> Result<()> {
+                for i in 0..operations_per_thread {
+                    // Mix of different operations to stress the database
+                    match i % 4 {
+                        0 => {
+                            // Insert operation
+                            let artist = Artist {
+                                name: format!("Artist-{}-{}", thread_id, i),
+                                summary: Some(format!("Summary for artist {} from thread {}", i, thread_id)),
+                                ..Default::default()
+                            };
+                            db_clone.save(&artist)?;
+                        },
+                        1 => {
+                            // Transaction with multiple operations
+                            db_clone.transaction(|t| -> Result<()> {
+                                let artist1 = Artist {
+                                    name: format!("TxnArtist1-{}-{}", thread_id, i),
+                                    ..Default::default()
+                                };
+                                let artist2 = Artist {
+                                    name: format!("TxnArtist2-{}-{}", thread_id, i),
+                                    ..Default::default()
+                                };
+                                t.save(&artist1)?;
+                                t.save(&artist2)?;
+                                Ok(())
+                            })?;
+                        },
+                        2 => {
+                            // Query operation
+                            let _artists: Vec<Artist> = db_clone.query("SELECT * FROM Artist LIMIT 10", [])?;
+                        },
+                        3 => {
+                            // Update operation (try to find and update an existing artist)
+                            let artists: Vec<Artist> = db_clone.query(
+                                "SELECT * FROM Artist WHERE name LIKE ? LIMIT 1", 
+                                [format!("Artist-{}-%" , thread_id)]
+                            )?;
+                            if let Some(mut artist) = artists.into_iter().next() {
+                                artist.summary = Some(format!("Updated by thread {} at op {}", thread_id, i));
+                                db_clone.save(&artist)?;
+                            }
+                        },
+                        _ => unreachable!()
+                    }
+                    
+                    // Small delay to increase chance of contention
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            });
+            handles.push(handle);
+        }
+        
+        // Wait for all threads to complete and collect results
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => results.push(result),
+                Err(_) => return Err(anyhow::anyhow!("Thread panicked")),
+            }
+        }
+        
+        // Check that all threads completed successfully
+        for result in results {
+            result?;
+        }
+        
+        // Verify final state - should have many artists in the database
+        let final_count: Vec<Artist> = db.query("SELECT * FROM Artist", [])?;
+        println!("Stress test completed. Total artists created: {}", final_count.len());
+        
+        // Should have at least some artists (exact count depends on timing)
+        assert!(final_count.len() > 100, "Expected many artists to be created");
+        
+        // Cleanup temporary database file
+        std::fs::remove_file(&db_path).ok();
         
         Ok(())
     }

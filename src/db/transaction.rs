@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rusqlite::{Params, Transaction};
 use uuid::Uuid;
+use std::cell::RefCell;
 
 use crate::db::{Db, Entity, types::DbEvent};
 
@@ -8,6 +9,7 @@ pub struct DbTransaction<'a> {
     db: &'a Db,
     txn: &'a Transaction<'a>,
     id: String,
+    pending_events: RefCell<Vec<DbEvent>>,
 }
 
 impl<'a> DbTransaction<'a> {
@@ -16,6 +18,7 @@ impl<'a> DbTransaction<'a> {
             db,
             txn,
             id: Uuid::now_v7().to_string(),
+            pending_events: RefCell::new(Vec::new()),
         }
     }
 
@@ -54,13 +57,13 @@ impl<'a> DbTransaction<'a> {
         self.track_changes(&table_name, &id, old_value.as_ref(), 
             &new_value, &column_names)?;
         
-        // Notify subscribers
+        // Queue event for notification after commit
         let event = if exists {
             DbEvent::Update(table_name.clone(), id.clone())
         } else {
             DbEvent::Insert(table_name.clone(), id.clone())
         };
-        self.db.notify_subscribers(event);
+        self.pending_events.borrow_mut().push(event);
         
         self.get::<E>(&id)?
             .ok_or_else(|| anyhow::anyhow!("Failed to retrieve saved entity"))    
@@ -189,5 +192,9 @@ impl<'a> DbTransaction<'a> {
         }
         
         Ok(())
+    }
+
+    pub(crate) fn take_pending_events(&self) -> Vec<DbEvent> {
+        std::mem::take(&mut *self.pending_events.borrow_mut())
     }
 }
