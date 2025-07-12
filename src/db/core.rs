@@ -105,6 +105,17 @@ impl Db {
         Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
 
+    /// Get the database UUID (author_id for sync)
+    pub fn get_database_uuid(&self) -> Result<String> {
+        let conn = self.pool.get()?;
+        let uuid: String = conn.query_row(
+            "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",
+            [],
+            |row| row.get(0)
+        )?;
+        Ok(uuid)
+    }
+
 
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query

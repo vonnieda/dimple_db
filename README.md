@@ -51,13 +51,13 @@ since then.
 bucket/base_path
 ├── {author_1_id}/
 │   ├── dimple_db.json # Manifest file, updated on every sync
-│   ├── {transactions_uuid_v7_through_uuid_v7}.json # Transaction bundles
-│   ├── {transactions_uuid_v7_through_uuid_v7}.json
+│   ├── {transactions_uuid_v7_uuid_v7}.json # Transaction bundles
+│   ├── {transactions_uuid_v7_uuid_v7}.json
 │   └── ...
 ├── {author_2_id}/
 │   ├── dimple_db.json
-│   ├── {transactions_uuid_v7_through_uuid_v7}.json # Transaction bundles
-│   ├── {transactions_uuid_v7_through_uuid_v7}.json
+│   ├── {transactions_uuid_v7_uuid_v7}.json # Transaction bundles
+│   ├── {transactions_uuid_v7_uuid_v7}.json
 │   └── ...
 └── ...
 ```
@@ -73,14 +73,14 @@ The `dimple_db.json` manifest file tracks the sync state for each author/device 
   "last_sync_timestamp": "2024-07-11T10:30:45.123Z",
   "bundles": [
     {
-      "filename": "01933b2a-1111-7111-1111-111111111111_through_01933b2d-2222-7222-2222-222222222222.json",
+      "filename": "01933b2a-1111-7111-1111-111111111111_01933b2d-2222-7222-2222-222222222222.json",
       "first_transaction_id": "01933b2a-1111-7111-1111-111111111111",
       "last_transaction_id": "01933b2d-2222-7222-2222-222222222222",
       "transaction_count": 42,
       "created_at": "2024-07-11T09:15:30.456Z"
     },
     {
-      "filename": "01933b2d-3333-7333-3333-333333333333_through_01933b2e-3f47-7b12-9c8d-1234567890ab.json",
+      "filename": "01933b2d-3333-7333-3333-333333333333_01933b2e-3f47-7b12-9c8d-1234567890ab.json",
       "first_transaction_id": "01933b2d-3333-7333-3333-333333333333", 
       "last_transaction_id": "01933b2e-3f47-7b12-9c8d-1234567890ab",
       "transaction_count": 15,
