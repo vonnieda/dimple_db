@@ -21,6 +21,8 @@ impl Db {
         let pool = r2d2::Pool::builder()
             .connection_customizer(Box::new(DbConnectionCustomizer{}))
             // https://beets.io/blog/sqlite-nightmare.html
+            // https://sqlite.org/wal.html
+            // > 9. Sometimes Queries Return SQLITE_BUSY In WAL Mode
             .max_size(1)
             .build(manager)?;
         Self::from_pool(pool)
