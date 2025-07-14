@@ -35,8 +35,8 @@ level.
 
 ## Storage Layout
 
-Each author / device participating in the sync has a unique UUIDv7 called
-their author_id.
+Each author / device participating in the sync has a unique, persistent UUIDv7
+called their author_id. This is stored as `database_uuid` in ZV_METADATA.
 
 Each author / device uploads change transactions in bundles under their
 author UUID. Transaction bundles are JSON files containing an array of
