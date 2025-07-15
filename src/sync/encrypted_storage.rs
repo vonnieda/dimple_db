@@ -46,10 +46,7 @@ impl EncryptedStorage {
 
     
     fn encrypt_bytes(&self, data: &[u8]) -> Result<Vec<u8>> {
-        // Ensure keys are created
-        self.get_or_create_keys()?;
-        
-        // Use age for proper encryption
+        self.get_or_create_keys()?;        
         let keys_guard = self.cached_keys.lock()
             .map_err(|_| anyhow::anyhow!("Failed to acquire keys lock"))?;
         let (recipient, _) = keys_guard.as_ref().unwrap();
@@ -58,10 +55,7 @@ impl EncryptedStorage {
     }
     
     fn decrypt_bytes(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
-        // Ensure keys are created
         self.get_or_create_keys()?;
-        
-        // Use age for proper decryption
         let keys_guard = self.cached_keys.lock()
             .map_err(|_| anyhow::anyhow!("Failed to acquire keys lock"))?;
         let (_, identity) = keys_guard.as_ref().unwrap();
@@ -73,19 +67,15 @@ impl EncryptedStorage {
 
 impl SyncStorage for EncryptedStorage {
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        log::debug!("ENCRYPTED STORAGE LIST: prefix='{}'", prefix);
-        
+        log::debug!("ENCRYPTED STORAGE LIST: prefix='{}'", prefix);        
         // Pass through to underlying storage - paths are not encrypted
         self.inner.list(prefix)
     }
     
     fn get(&self, path: &str) -> Result<Vec<u8>> {
         log::debug!("ENCRYPTED STORAGE GET: path='{}'", path);
-        let encrypted_content = self.inner.get(path)?;
-        
-        // Decrypt the bytes directly
+        let encrypted_content = self.inner.get(path)?;        
         let decrypted = self.decrypt_bytes(&encrypted_content)?;
-        
         log::debug!("ENCRYPTED STORAGE GET RESULT: {} bytes", decrypted.len());
         Ok(decrypted)
     }
@@ -93,10 +83,7 @@ impl SyncStorage for EncryptedStorage {
     fn put(&self, path: &str, content: &[u8]) -> Result<()> {
         log::debug!("ENCRYPTED STORAGE PUT: path='{}', size={} bytes", path, content.len());
         let encrypted_content = self.encrypt_bytes(content)?;
-        
-        // Store encrypted bytes directly
         self.inner.put(path, &encrypted_content)?;
-        
         log::debug!("ENCRYPTED STORAGE PUT RESULT: success");
         Ok(())
     }

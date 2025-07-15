@@ -35,6 +35,14 @@ impl<'a> DbTransaction<'a> {
     /// 
     /// Note that only fields present in both the table and entity are mapped.
     pub fn save<E: Entity>(&self, entity: &E) -> Result<E> {
+        self.save_internal(entity, true)
+    }
+
+    pub fn save_untracked<E: Entity>(&self, entity: &E) -> Result<E> {
+        self.save_internal(entity, false)
+    }
+
+    fn save_internal<E: Entity>(&self, entity: &E, track_changes: bool) -> Result<E> {
         let table_name = self.db.table_name_for_type::<E>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
 
@@ -54,8 +62,10 @@ impl<'a> DbTransaction<'a> {
         }
         
         // Track changes
-        self.track_changes(&table_name, &id, old_value.as_ref(), 
-            &new_value, &column_names)?;
+        if track_changes {
+            self.track_changes(&table_name, &id, old_value.as_ref(), 
+                &new_value, &column_names)?;
+        }
         
         // Queue event for notification after commit
         let event = if exists {
@@ -135,13 +145,8 @@ impl<'a> DbTransaction<'a> {
             column_names: &[String]) -> Result<()> {
         
     
-        // First, ensure we have a transaction record
         // Get database_uuid to use as author
-        let database_uuid: String = self.txn.query_row(
-            "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",
-            [],
-            |row| row.get(0)
-        )?;
+        let database_uuid = self.db.get_database_uuid()?;
         
         self.txn.execute(
             "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",

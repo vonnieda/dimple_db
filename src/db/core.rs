@@ -91,6 +91,7 @@ impl Db {
         self.transaction(|t| t.save(entity))
     }
 
+    /// Simple query without creating a transaction.
     pub fn query<E: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Vec<E>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(sql)?;
@@ -99,14 +100,17 @@ impl Db {
         Ok(entities)
     }
 
+    /// Get a single entity by id without creating a transaction.
     pub fn get<E: Entity>(&self, id: &str) -> Result<Option<E>> {
         let table_name = self.table_name_for_type::<E>()?;
         let sql = format!("SELECT * FROM {} WHERE id = ? LIMIT 1", table_name);
         Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
 
-    /// Get the database UUID (author_id for sync)
+    /// Get the database's unique UUIDv7. This is created when the database is
+    /// first initialized and never changes.
     pub fn get_database_uuid(&self) -> Result<String> {
+        // TODO cache it
         let conn = self.pool.get()?;
         let uuid: String = conn.query_row(
             "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",

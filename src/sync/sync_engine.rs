@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{db::Db, sync::{encrypted_storage::EncryptedStorage, local_storage::LocalStorage, memory_storage::InMemoryStorage, s3_storage::S3Storage, SyncStorage}};
 
@@ -17,8 +18,9 @@ impl SyncEngine {
         SyncEngineBuilder::default()
     }
 
-    pub fn sync(&self, _db: &Db) -> Result<()> {
-        let _ = &self.storage; // Use storage to avoid dead code warning
+    pub fn sync(&self, db: &Db) -> Result<()> {
+        // NOTE: Don't do any storage IO in a transaction
+        let database_uuid = db.get_database_uuid()?;
         todo!()
     }
 }
