@@ -6,18 +6,11 @@ pub trait Entity: Serialize + DeserializeOwned {}
 // Blanket implementation for any type that meets the requirements
 impl<T> Entity for T where T: Serialize + DeserializeOwned {}
 
-/// Represents a transaction record in the ZV_TRANSACTION table
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangeTransaction {
-    pub id: String,
-    pub author: String,
-}
-
 /// Represents a change record in the ZV_CHANGE table
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChangeRecord {
     pub id: String,
-    pub transaction_id: String,
+    pub author_id: String,
     pub entity_type: String,
     pub entity_id: String,
     pub attribute: String,

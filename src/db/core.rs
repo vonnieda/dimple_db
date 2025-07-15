@@ -160,20 +160,14 @@ impl Db {
             INSERT OR IGNORE INTO ZV_METADATA (key, value) 
                 VALUES ('database_uuid', uuid7());
 
-            CREATE TABLE IF NOT EXISTS ZV_TRANSACTION (
-                id TEXT NOT NULL PRIMARY KEY,
-                author TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS ZV_CHANGE (
                 id TEXT NOT NULL PRIMARY KEY,
-                transaction_id TEXT NOT NULL,
+                author_id TEXT NOT NULL,
                 entity_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 attribute TEXT NOT NULL,
                 old_value TEXT,
-                new_value TEXT,
-                FOREIGN KEY (transaction_id) REFERENCES ZV_TRANSACTION(id)
+                new_value TEXT
             );
         ")?;
         Ok(())
@@ -235,7 +229,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::db::Db;
-    use crate::db::types::{ChangeTransaction, ChangeRecord, DbEvent};
+    use crate::db::types::{ChangeRecord, DbEvent};
 
     fn setup_db() -> Result<Db> {
         let db = Db::open_memory()?;
@@ -246,13 +240,10 @@ mod tests {
         Ok(db)
     }
 
-    fn get_transactions(db: &Db) -> Result<Vec<ChangeTransaction>> {
-        db.query("SELECT id, author FROM ZV_TRANSACTION ORDER BY id", [])
-    }
 
     fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangeRecord>> {
         db.query(
-            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
+            "SELECT id, author_id, entity_type, entity_id, attribute, old_value, new_value 
              FROM ZV_CHANGE WHERE entity_id = ? ORDER BY attribute",
             [entity_id]
         )
@@ -260,7 +251,7 @@ mod tests {
 
     fn get_changes_for_attribute(db: &Db, entity_id: &str, attribute: &str) -> Result<Vec<ChangeRecord>> {
         db.query(
-            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
+            "SELECT id, author_id, entity_type, entity_id, attribute, old_value, new_value 
              FROM ZV_CHANGE WHERE entity_id = ? AND attribute = ? ORDER BY id",
             [entity_id, attribute]
         )
@@ -344,20 +335,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn multiple_saves_in_transaction_share_transaction_id() -> Result<()> {
-        let db = setup_db()?;
-        let artist = db.transaction(|txn| {
-            let mut artist = txn.save(&Artist::default())?;
-            artist.name = "Tool".to_string();
-            txn.save(&artist)
-        })?;
-        
-        let changes = get_changes(&db, &artist.id)?;
-        let transaction_id = &changes[0].transaction_id;
-        assert!(changes.iter().all(|c| c.transaction_id == *transaction_id));
-        Ok(())
-    }
 
     #[test]
     fn none_values_stored_as_sql_null() -> Result<()> {
@@ -378,11 +355,12 @@ mod tests {
     #[test]
     fn author_is_database_uuid() -> Result<()> {
         let db = setup_db()?;
-        let _ = db.save(&Artist::default())?;
+        let artist = db.save(&Artist::default())?;
         
-        let transactions = get_transactions(&db)?;
-        assert_eq!(transactions.len(), 1);
-        assert!(uuid::Uuid::parse_str(&transactions[0].author).is_ok());
+        let changes = get_changes(&db, &artist.id)?;
+        assert!(!changes.is_empty());
+        assert_eq!(changes[0].author_id, db.get_database_uuid()?);
+        assert!(uuid::Uuid::parse_str(&changes[0].author_id).is_ok());
         Ok(())
     }
 
@@ -473,13 +451,11 @@ mod tests {
         let db = setup_db()?;
         let artist = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
         
-        let transactions = get_transactions(&db)?;
         let changes = get_changes(&db, &artist.id)?;
         
-        assert_eq!(transactions.len(), 1);
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].entity_type, "Artist");
-        assert_eq!(changes[0].transaction_id, transactions[0].id);
+        assert_eq!(changes[0].author_id, db.get_database_uuid()?);
         Ok(())
     }
 

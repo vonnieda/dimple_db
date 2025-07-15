@@ -8,7 +8,6 @@ use crate::db::{Db, Entity, types::DbEvent};
 pub struct DbTransaction<'a> {
     db: &'a Db,
     txn: &'a Transaction<'a>,
-    id: String,
     pending_events: RefCell<Vec<DbEvent>>,
 }
 
@@ -17,7 +16,6 @@ impl<'a> DbTransaction<'a> {
         Self {
             db,
             txn,
-            id: Uuid::now_v7().to_string(),
             pending_events: RefCell::new(Vec::new()),
         }
     }
@@ -149,14 +147,8 @@ impl<'a> DbTransaction<'a> {
             new_entity: &serde_json::Value,
             column_names: &[String]) -> Result<()> {
         
-    
         // Get database_uuid to use as author
-        let database_uuid = self.db.get_database_uuid()?;
-        
-        self.txn.execute(
-            "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
-            [&self.id, &database_uuid]
-        )?;
+        let author_id = self.db.get_database_uuid()?;
         
         // Track changes for each column (except id)
         for column_name in column_names {
@@ -187,10 +179,10 @@ impl<'a> DbTransaction<'a> {
                 
                 // Use rusqlite's support for Option to store NULL values properly
                 self.txn.execute(
-                    "INSERT INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     rusqlite::params![
                         &change_id,
-                        &self.id,
+                        &author_id,
                         table_name,
                         entity_id,
                         column_name,

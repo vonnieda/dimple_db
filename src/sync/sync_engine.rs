@@ -66,10 +66,9 @@ impl SyncEngine {
         db.transaction(|txn| {
             let conn = txn.connection();
             let mut stmt = conn.prepare(
-                "SELECT c.id FROM ZV_CHANGE c 
-                 JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
-                 WHERE t.author = ? 
-                 ORDER BY c.id DESC 
+                "SELECT id FROM ZV_CHANGE 
+                 WHERE author_id = ? 
+                 ORDER BY id DESC 
                  LIMIT 1"
             )?;
             
@@ -107,18 +106,12 @@ impl SyncEngine {
             let conn = txn.connection();
             
             for change in bundle.changes {
-                // Insert the transaction if it doesn't exist
                 conn.execute(
-                    "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
-                    params![&change.transaction_id, &bundle.replica_id]
-                )?;
-                
-                conn.execute(
-                    "INSERT OR IGNORE INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) 
+                    "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, attribute, old_value, new_value) 
                      VALUES (?, ?, ?, ?, ?, ?, ?)",
                     params![
                         &change.id,
-                        &change.transaction_id,
+                        &change.author_id,
                         &change.entity_type,
                         &change.entity_id,
                         &change.attribute,
@@ -231,61 +224,35 @@ impl SyncEngine {
     }
     
     fn get_unpushed_changes(&self, db: &Db, replica_id: &str, after_change_id: Option<&str>) -> Result<Vec<Change>> {
-        // TODO this can just check >= 0 for an empty change id to simplfiy this
-        // repeated code
         db.transaction(|txn| {
             let conn = txn.connection();
             
-            let mut changes = Vec::new();
+            // Use "0" as minimum value when no after_change_id is provided
+            // since UUIDv7s are lexicographically sortable and will all be > "0"
+            let after_id = after_change_id.unwrap_or("0");
             
-            if let Some(after_id) = after_change_id {
-                let mut stmt = conn.prepare(
-                    "SELECT c.id, c.transaction_id, c.entity_type, c.entity_id, c.attribute, c.old_value, c.new_value 
-                     FROM ZV_CHANGE c 
-                     JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
-                     WHERE t.author = ? AND c.id > ? 
-                     ORDER BY c.id"
-                )?;
-                
-                let rows = stmt.query_map(params![replica_id, after_id], |row| {
-                    Ok(Change {
-                        id: row.get(0)?,
-                        transaction_id: row.get(1)?,
-                        entity_type: row.get(2)?,
-                        entity_id: row.get(3)?,
-                        attribute: row.get(4)?,
-                        old_value: row.get(5)?,
-                        new_value: row.get(6)?,
-                    })
-                })?;
-                
-                for row in rows {
-                    changes.push(row?);
-                }
-            } else {
-                let mut stmt = conn.prepare(
-                    "SELECT c.id, c.transaction_id, c.entity_type, c.entity_id, c.attribute, c.old_value, c.new_value 
-                     FROM ZV_CHANGE c 
-                     JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
-                     WHERE t.author = ? 
-                     ORDER BY c.id"
-                )?;
-                
-                let rows = stmt.query_map(params![replica_id], |row| {
-                    Ok(Change {
-                        id: row.get(0)?,
-                        transaction_id: row.get(1)?,
-                        entity_type: row.get(2)?,
-                        entity_id: row.get(3)?,
-                        attribute: row.get(4)?,
-                        old_value: row.get(5)?,
-                        new_value: row.get(6)?,
-                    })
-                })?;
-                
-                for row in rows {
-                    changes.push(row?);
-                }
+            let mut stmt = conn.prepare(
+                "SELECT id, author_id, entity_type, entity_id, attribute, old_value, new_value 
+                 FROM ZV_CHANGE 
+                 WHERE author_id = ? AND id > ? 
+                 ORDER BY id"
+            )?;
+            
+            let mut changes = Vec::new();
+            let rows = stmt.query_map(params![replica_id, after_id], |row| {
+                Ok(Change {
+                    id: row.get(0)?,
+                    author_id: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    attribute: row.get(4)?,
+                    old_value: row.get(5)?,
+                    new_value: row.get(6)?,
+                })
+            })?;
+            
+            for row in rows {
+                changes.push(row?);
             }
             
             Ok(changes)
@@ -334,7 +301,7 @@ pub struct ChangeBundle {
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Change {
     pub id: String,
-    pub transaction_id: String,
+    pub author_id: String,
     pub entity_type: String,
     pub entity_id: String,
     pub attribute: String,
