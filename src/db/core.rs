@@ -114,7 +114,6 @@ impl Db {
         Ok(self.database_uuid.clone())
     }
 
-
     /// Performs the given query, calling the closure with the results
     /// immediately and then again any time any table referenced in the query
     /// changes. Returns a QuerySubscription that automatically unsubscribes the
