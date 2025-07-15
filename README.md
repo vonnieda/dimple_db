@@ -54,18 +54,18 @@ level.
 - [UUIDv7: Timestamp ordered UUIDs](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format)
 - [Riffle Systems](https://riffle.systems/)
 - [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
-- https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html
-- https://cse.buffalo.edu/tech-reports/2014-04.pdf
+- [Hybrid Logical Clocks](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html)
+- [Logical Physical Clocks](https://cse.buffalo.edu/tech-reports/2014-04.pdf)
 
 ## Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)
 
 ## Similar Projects
-- [RxDB is a local-first, NoSQL-database for JavaScript Applications](https://github.com/pubkey/rxdb)
-- [Dexie.js is a wrapper library for indexedDB](https://github.com/dexie/Dexie.js)
-- [WatermelondDB: A reactive database framework](https://github.com/nozbe/WatermelonDB)
-- [Drift is a reactive persistence library for Flutter and Dart, built on top of SQLite](https://github.com/simolus3/drift)
-- [Electric SQL: Real-time sync for Postgres.](https://github.com/electric-sql/electric)
-- [LiveStore: Reactive SQLite for local-first apps](https://livestore.dev/)	
-- [TinyBase: The reactive data store for local-first apps](https://github.com/tinyplex/tinybase)	
+- [RxDB](https://github.com/pubkey/rxdb)
+- [Dexie.js](https://github.com/dexie/Dexie.js)
+- [WatermelondDB](https://github.com/nozbe/WatermelonDB)
+- [Drift](https://github.com/simolus3/drift)
+- [Electric SQL](https://github.com/electric-sql/electric)
+- [LiveStore](https://livestore.dev/)	
+- [TinyBase](https://github.com/tinyplex/tinybase)	
 

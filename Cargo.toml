@@ -10,17 +10,19 @@ keywords = ["database", "sqlite", "sync", "s3", "reactive", "localfirst"]
 categories = ["database-implementations"]
 
 [dependencies]
-log = "0.4"
+age = "0.11.1"
 anyhow = "1.0"
-uuid = { version = "1.17", features = ["v7"] }
-rusqlite = { version = "0.36", features = ["functions"] }
-rusqlite_migration = { version = "2.2", features = ["from-directory"] }
+include_dir = "0.7.4"
+log = "0.4"
+r2d2 = "0.8.10"
+r2d2_sqlite = "0.31.0"
+rusqlite = { version = "0.37", features = ["bundled", "functions"] }
+rusqlite_migration = { version = "2.3", features = ["from-directory"] }
+rust-s3 = { version = "0.33.0", features = ["sync-native-tls"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_rusqlite = "0.39"
-rust-s3 = { version = "0.33.0", features = ["sync-native-tls"], default-features = false }
-age = "0.11.1"
-include_dir = "0.7.4"
+serde_rusqlite = "0.40.0"
+uuid = { version = "1.17", features = ["v7"] }
 
 [dev-dependencies]
 env_logger = "0.11"
