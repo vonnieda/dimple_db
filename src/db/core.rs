@@ -13,6 +13,7 @@ use crate::db::{query::QuerySubscription, transaction::DbTransaction, types::DbE
 pub struct Db {
     pool: Pool<SqliteConnectionManager>,
     subscribers: Arc<Mutex<Vec<Sender<DbEvent>>>>,
+    database_uuid: String,
 }
 
 impl Db {
@@ -110,14 +111,7 @@ impl Db {
     /// Get the database's unique UUIDv7. This is created when the database is
     /// first initialized and never changes.
     pub fn get_database_uuid(&self) -> Result<String> {
-        // TODO cache it
-        let conn = self.pool.get()?;
-        let uuid: String = conn.query_row(
-            "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",
-            [],
-            |row| row.get(0)
-        )?;
-        Ok(uuid)
+        Ok(self.database_uuid.clone())
     }
 
 
@@ -138,10 +132,16 @@ impl Db {
     fn from_pool(pool: Pool<SqliteConnectionManager>) -> Result<Self> {
         let conn = pool.get()?;
         Self::init_change_tracking_tables(&conn)?;
+        let database_uuid: String = conn.query_row(
+            "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",
+            [],
+            |row| row.get(0)
+        )?;
 
         let db = Db {
             pool,
             subscribers: Arc::new(Mutex::new(Vec::new())),
+            database_uuid,
         };
 
         Ok(db)
