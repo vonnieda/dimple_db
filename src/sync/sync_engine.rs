@@ -1,5 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use rusqlite::{params, OptionalExtension};
 
 use crate::{db::Db, sync::{encrypted_storage::EncryptedStorage, local_storage::LocalStorage, memory_storage::InMemoryStorage, s3_storage::S3Storage, SyncStorage}};
 
@@ -18,58 +20,326 @@ impl SyncEngine {
         SyncEngineBuilder::default()
     }
 
-
-    //  4. Sync Algorithm
-    // 	1. Pull new remote changes
-    // 		1. Get list of replicas by listing `*.dimple_db` and extracting the UUID part.
-    // 		2. (Optionally) Register unknown replicas, "Want to sync with replica id XYZ?", and then save their public key.
-    // 		3. For each replica:
-    // 			1. Read LATEST.json to get the id of the newest change.
-    // 			2. See what the latest change stored for this replica is: `SELECT * FROM ZV_CHANGE WHERE author_id = {} ORDER BY id DESC LIMIT 1`
-    // 			3. If there are newer changes, download the new files in order
-    // 			4. For each new change
-    // 				1. Insert the change into the ZV_CHANGE table
-    // 				2. If the change is newer than the last change to the given (entity, key, attribute) then update the entity in the database as well
-    // 	2. Push new local changes
-    // 		1. Read LATEST.json to get the id of the latest change uploaded
-    // 		2. If there are any newer changes stored:
-    // 			1. Upload a new Sqlite database containing just the new changes in ZV_CHANGE
-    // 			2. Update LATEST.json with the first and last change ids from the file just uploaded.
-    // NOTE: Don't do any storage IO in a transaction
     pub fn sync(&self, db: &Db) -> Result<()> {
-        self.pull()?;
-        self.push()?;
+        // TODO note changes are potentially very large and we're just
+        // loading them all into memory
+        self.pull(db)?;
+        self.push(db)?;
         Ok(())
     }
 
-    fn pull(&self) -> Result<()> {
-        for replica in self.list_replicas()? {
-            let latest = self.get_latest(&replica)?;
+    fn pull(&self, db: &Db) -> Result<()> {
+        let my_replica_id = db.get_database_uuid()?;
+        
+        let replicas = self.get_replicas()?;
+        
+        for replica in replicas {
+            if replica.replica_id == my_replica_id {
+                continue;
+            }
+            
+            self.pull_replica_changes(db, &replica)?;
+        }
+        Ok(())
+    }
+    
+    fn pull_replica_changes(&self, db: &Db, replica: &ReplicaInfo) -> Result<()> {
+        let latest_change_id = self.get_latest_change_for_replica(db, &replica.replica_id)?;
+        
+        let change_files = self.list_change_files(&replica.replica_id)?;
+        
+        for change_file in change_files {
+            if let Some(ref latest_id) = latest_change_id {
+                if change_file <= *latest_id {
+                    continue;
+                }
+            }
+            
+            let bundle = self.download_change_file(&replica.replica_id, &change_file)?;
+            self.apply_changes(db, bundle)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn get_latest_change_for_replica(&self, db: &Db, replica_id: &str) -> Result<Option<String>> {
+        db.transaction(|txn| {
+            let conn = txn.connection();
+            let mut stmt = conn.prepare(
+                "SELECT c.id FROM ZV_CHANGE c 
+                 JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
+                 WHERE t.author = ? 
+                 ORDER BY c.id DESC 
+                 LIMIT 1"
+            )?;
+            
+            let result = stmt.query_row(params![replica_id], |row| {
+                row.get::<_, String>(0)
+            }).optional()?;
+            
+            Ok(result)
+        })
+    }
+    
+    fn list_change_files(&self, replica_id: &str) -> Result<Vec<String>> {
+        let prefix = format!("changes/{}/", replica_id);
+        let files = self.storage.list(&prefix)?;
+        let mut change_files: Vec<String> = files.iter()
+            .filter_map(|f| {
+                f.strip_prefix(&prefix)
+                    .and_then(|s| s.strip_suffix(".json"))
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        change_files.sort();
+        Ok(change_files)
+    }
+    
+    fn download_change_file(&self, replica_id: &str, change_file: &str) -> Result<ChangeBundle> {
+        let path = format!("changes/{}/{}.json", replica_id, change_file);
+        let data = self.storage.get(&path)?;
+        let bundle: ChangeBundle = serde_json::from_slice(&data)?;
+        Ok(bundle)
+    }
+    
+    fn apply_changes(&self, db: &Db, bundle: ChangeBundle) -> Result<()> {
+        db.transaction(|txn| {
+            let conn = txn.connection();
+            
+            for change in bundle.changes {
+                // Insert the transaction if it doesn't exist
+                conn.execute(
+                    "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
+                    params![&change.transaction_id, &bundle.replica_id]
+                )?;
+                
+                conn.execute(
+                    "INSERT OR IGNORE INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    params![
+                        &change.id,
+                        &change.transaction_id,
+                        &change.entity_type,
+                        &change.entity_id,
+                        &change.attribute,
+                        &change.old_value,
+                        &change.new_value,
+                    ]
+                )?;
+                
+                if self.is_latest_change_for_attribute(conn, &change)? {
+                    self.apply_change_to_entity(conn, &change)?;
+                }
+            }
+            
+            Ok(())
+        })
+    }
+    
+    fn is_latest_change_for_attribute(&self, conn: &rusqlite::Connection, change: &Change) -> Result<bool> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM ZV_CHANGE 
+             WHERE entity_type = ? AND entity_id = ? AND attribute = ? 
+             ORDER BY id DESC 
+             LIMIT 1"
+        )?;
+        
+        let latest_id: String = stmt.query_row(
+            params![&change.entity_type, &change.entity_id, &change.attribute],
+            |row| row.get(0)
+        ).unwrap_or_else(|_| change.id.clone());
+        
+        Ok(latest_id <= change.id)
+    }
+    
+    fn apply_change_to_entity(&self, conn: &rusqlite::Connection, change: &Change) -> Result<()> {
+        // Parse the JSON value to get the actual value
+        let parsed_value = if let Some(ref new_value) = change.new_value {
+            // The value is stored as JSON, so we need to parse it
+            let parsed: serde_json::Value = serde_json::from_str(new_value)?;
+            match parsed {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => Some(s),
+                _ => Some(parsed.to_string()),
+            }
+        } else {
+            None
+        };
+        
+        // First check if the entity exists
+        let check_sql = format!("SELECT COUNT(*) FROM {} WHERE id = ?", change.entity_type);
+        let count: i64 = conn.query_row(&check_sql, params![&change.entity_id], |row| row.get(0))?;
+        
+        if count == 0 {
+            // Entity doesn't exist, we need to insert it
+            let insert_sql = format!(
+                "INSERT INTO {} (id, {}) VALUES (?, ?)",
+                change.entity_type, change.attribute
+            );
+            conn.execute(&insert_sql, params![&change.entity_id, &parsed_value])?;
+        } else if parsed_value.is_some() {
+            // Entity exists, update it
+            let sql = format!(
+                "UPDATE {} SET {} = ? WHERE id = ?",
+                change.entity_type, change.attribute
+            );
+            conn.execute(&sql, params![&parsed_value, &change.entity_id])?;
         }
         Ok(())
     }
 
-    fn push(&self) -> Result<()> {
+    fn push(&self, db: &Db) -> Result<()> {
+        let my_replica_id = db.get_database_uuid()?;
+        
+        let latest_pushed_change = self.get_latest_pushed_change(&my_replica_id)?;
+        
+        let unpushed_changes = self.get_unpushed_changes(db, &my_replica_id, latest_pushed_change.as_deref())?;
+        
+        if unpushed_changes.is_empty() {
+            return Ok(());
+        }
+        
+        let change_file_id = Uuid::now_v7().to_string();
+        let bundle = ChangeBundle {
+            replica_id: my_replica_id.clone(),
+            changes: unpushed_changes,
+        };
+        
+        let _first_change_id = bundle.changes.first().map(|c| c.id.clone()).unwrap();
+        let last_change_id = bundle.changes.last().map(|c| c.id.clone()).unwrap();
+        
+        let data = serde_json::to_vec(&bundle)?;
+        let change_path = format!("changes/{}/{}.json", my_replica_id, change_file_id);
+        self.storage.put(&change_path, &data)?;
+        
+        let replica_info = ReplicaInfo {
+            replica_id: my_replica_id.clone(),
+            latest_change_id: last_change_id,
+            latest_change_file: change_file_id,
+        };
+        let replica_data = serde_json::to_vec(&replica_info)?;
+        self.storage.put(&format!("replicas/{}.json", my_replica_id), &replica_data)?;
+        
         Ok(())
     }
-
-    fn list_replicas(&self) -> Result<Vec<String>> {
-        // TODO okay, first issue is we end up listing objects we don't need
-        // cause not using a good prefix. 
-        self.storage.list("")
+    
+    fn get_latest_pushed_change(&self, replica_id: &str) -> Result<Option<String>> {
+        match self.get_replica_info(replica_id) {
+            Ok(info) => Ok(Some(info.latest_change_id)),
+            Err(_) => Ok(None),
+        }
+    }
+    
+    fn get_unpushed_changes(&self, db: &Db, replica_id: &str, after_change_id: Option<&str>) -> Result<Vec<Change>> {
+        // TODO this can just check >= 0 for an empty change id to simplfiy this
+        // repeated code
+        db.transaction(|txn| {
+            let conn = txn.connection();
+            
+            let mut changes = Vec::new();
+            
+            if let Some(after_id) = after_change_id {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.transaction_id, c.entity_type, c.entity_id, c.attribute, c.old_value, c.new_value 
+                     FROM ZV_CHANGE c 
+                     JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
+                     WHERE t.author = ? AND c.id > ? 
+                     ORDER BY c.id"
+                )?;
+                
+                let rows = stmt.query_map(params![replica_id, after_id], |row| {
+                    Ok(Change {
+                        id: row.get(0)?,
+                        transaction_id: row.get(1)?,
+                        entity_type: row.get(2)?,
+                        entity_id: row.get(3)?,
+                        attribute: row.get(4)?,
+                        old_value: row.get(5)?,
+                        new_value: row.get(6)?,
+                    })
+                })?;
+                
+                for row in rows {
+                    changes.push(row?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT c.id, c.transaction_id, c.entity_type, c.entity_id, c.attribute, c.old_value, c.new_value 
+                     FROM ZV_CHANGE c 
+                     JOIN ZV_TRANSACTION t ON c.transaction_id = t.id 
+                     WHERE t.author = ? 
+                     ORDER BY c.id"
+                )?;
+                
+                let rows = stmt.query_map(params![replica_id], |row| {
+                    Ok(Change {
+                        id: row.get(0)?,
+                        transaction_id: row.get(1)?,
+                        entity_type: row.get(2)?,
+                        entity_id: row.get(3)?,
+                        attribute: row.get(4)?,
+                        old_value: row.get(5)?,
+                        new_value: row.get(6)?,
+                    })
+                })?;
+                
+                for row in rows {
+                    changes.push(row?);
+                }
+            }
+            
+            Ok(changes)
+        })
     }
 
-    fn get_latest(&self, replica_id: &str) -> Result<LatestChanges> {
-        todo!()
+    fn get_replicas(&self) -> Result<Vec<ReplicaInfo>> {
+        let replicas = self.list_replica_ids()?.iter()
+            // TODO log or mark the ones that error
+            .filter_map(|replica_id| self.get_replica_info(replica_id).ok())
+            .collect::<Vec<_>>();
+        Ok(replicas)
+    }
+
+    fn list_replica_ids(&self) -> Result<Vec<String>> {
+        let files = self.storage.list("replicas/")?;
+        let replica_ids = files.iter()
+            .filter_map(|r| {
+                r.strip_prefix("replicas/")
+                    .and_then(|s| s.strip_suffix(".json"))
+                    .map(|s| s.to_string())
+            })
+            .collect::<Vec<_>>();
+        Ok(replica_ids)
+    }
+
+    fn get_replica_info(&self, replica_id: &str) -> Result<ReplicaInfo> {
+        let data = self.storage.get(&format!("replicas/{}.json", replica_id))?;
+        Ok(serde_json::from_slice(&data)?)
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
-pub struct LatestChanges {
-    pub author_id: String,
-    pub latest_file: String,
-    pub latest_file_first_change_id: String,
-    pub latest_file_last_change_id: String,
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct ReplicaInfo {
+    pub replica_id: String,
+    pub latest_change_id: String,
+    pub latest_change_file: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct ChangeBundle {
+    pub replica_id: String,
+    pub changes: Vec<Change>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct Change {
+    pub id: String,
+    pub transaction_id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub attribute: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
 }
 
 #[derive(Default)]
@@ -130,18 +400,38 @@ mod tests {
         let db2 = Db::open_memory()?;
         db1.migrate(&migrations)?;
         db2.migrate(&migrations)?;
+        
         db1.save(&Artist {
             name: "Metallica".to_string(),
             ..Default::default()
         })?;
+        db1.save(&Artist {
+            name: "Megadeth".to_string(),
+            ..Default::default()
+        })?;
+        db1.save(&Artist {
+            ..Default::default()
+        })?;
+        db2.save(&Artist {
+            name: "Anthrax".to_string(),
+            ..Default::default()
+        })?;
+        db2.save(&Artist {
+            ..Default::default()
+        })?;
+        
         let sync_engine = SyncEngine::builder()
             .in_memory()
-            .encrypted("correct horse battery staple")
+            // .encrypted("correct horse battery staple")
             .build()?;
+            
         sync_engine.sync(&db1)?;
         sync_engine.sync(&db2)?;
-        assert_eq!(db1.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 1);
-        assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 1);
+        sync_engine.sync(&db1)?;
+        sync_engine.sync(&db2)?;
+        
+        assert_eq!(db1.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 5);
+        assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 5);
         Ok(())
     }
 

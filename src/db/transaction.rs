@@ -21,6 +21,11 @@ impl<'a> DbTransaction<'a> {
             pending_events: RefCell::new(Vec::new()),
         }
     }
+    
+    pub fn connection(&self) -> &rusqlite::Connection {
+        // TODO smells
+        self.txn
+    }
 
     /// Saves the entity to the database. 
     /// 
