@@ -13,9 +13,8 @@ pub struct ChangeRecord {
     pub author_id: String,
     pub entity_type: String,
     pub entity_id: String,
-    pub attribute: String,
-    pub old_value: Option<String>,
-    pub new_value: Option<String>,
+    pub old_values: Option<String>,
+    pub new_values: Option<String>,
 }
 
 /// Sent to subscribers whenever the database is changed. Each variant includes

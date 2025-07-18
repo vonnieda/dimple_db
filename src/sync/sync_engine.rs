@@ -21,20 +21,7 @@ impl SyncEngine {
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
-        // TODO note changes are potentially very large and we're just
-        // loading them all into memory
-        // TODO we aren't receiving notifications, or firing subscriptions, for
-        // stuff updated by sync. I think we should use DbTransaction.save_untracked
-        // if possible so there is only one place where this all happens.
-        // TODO we can't handle NOT NULL when creating a new object from sync
-        // it might be best to just use old_values and new_values, instead of
-        // singular. 
-        // So, this is why we had ZV_TRANSACTION in the first place and it occurs
-        // to me now that they were just representing different things, which
-        // was fine. A DbTransaction is a set, really, of ZV_TRANSACTION
-        // but it would probably be best to just change Zv_TRANSACTION and
-        // ZV_CHANGE to like ZV_CHANGE and ZV_CHANGE_COLUMN or just put a
-        // blob containing all the changed columns in ZV_CHANGE.
+        // TODO: Handle large change sets more efficiently (pagination, streaming)
         self.pull(db)?;
         self.push(db)?;
         Ok(())
@@ -76,19 +63,7 @@ impl SyncEngine {
     
     fn get_latest_change_for_replica(&self, db: &Db, replica_id: &str) -> Result<Option<String>> {
         db.transaction(|txn| {
-            let conn = txn.connection();
-            let mut stmt = conn.prepare(
-                "SELECT id FROM ZV_CHANGE 
-                 WHERE author_id = ? 
-                 ORDER BY id DESC 
-                 LIMIT 1"
-            )?;
-            
-            let result = stmt.query_row(params![replica_id], |row| {
-                row.get::<_, String>(0)
-            }).optional()?;
-            
-            Ok(result)
+            txn.get_latest_change_for_author(replica_id)
         })
     }
     
@@ -115,81 +90,110 @@ impl SyncEngine {
     
     fn apply_changes(&self, db: &Db, bundle: Changes) -> Result<()> {
         db.transaction(|txn| {
-            let conn = txn.connection();
-            
             for change in bundle.changes {
-                conn.execute(
-                    "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, attribute, old_value, new_value) 
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        &change.id,
-                        &change.author_id,
-                        &change.entity_type,
-                        &change.entity_id,
-                        &change.attribute,
-                        &change.old_value,
-                        &change.new_value,
-                    ]
-                )?;
+                // First insert the change into ZV_CHANGE
+                txn.insert_change(&change)?;
                 
-                if self.is_latest_change_for_attribute(conn, &change)? {
-                    self.apply_change_to_entity(conn, &change)?;
-                }
+                // Always apply changes, but only apply winning attributes
+                self.apply_change_to_entity(txn, &change)?;
             }
             
             Ok(())
         })
     }
     
-    fn is_latest_change_for_attribute(&self, conn: &rusqlite::Connection, change: &Change) -> Result<bool> {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM ZV_CHANGE 
-             WHERE entity_type = ? AND entity_id = ? AND attribute = ? 
-             ORDER BY id DESC 
-             LIMIT 1"
-        )?;
-        
-        let latest_id: String = stmt.query_row(
-            params![&change.entity_type, &change.entity_id, &change.attribute],
-            |row| row.get(0)
-        ).unwrap_or_else(|_| change.id.clone());
-        
-        Ok(latest_id <= change.id)
-    }
     
-    fn apply_change_to_entity(&self, conn: &rusqlite::Connection, change: &Change) -> Result<()> {
-        // Parse the JSON value to get the actual value
-        let parsed_value = if let Some(ref new_value) = change.new_value {
-            // The value is stored as JSON, so we need to parse it
-            let parsed: serde_json::Value = serde_json::from_str(new_value)?;
-            match parsed {
-                serde_json::Value::Null => None,
-                serde_json::Value::String(s) => Some(s),
-                _ => Some(parsed.to_string()),
+    fn apply_change_to_entity(&self, txn: &crate::db::transaction::DbTransaction, change: &Change) -> Result<()> {
+        // Parse the new_values to see which attributes this change wants to update
+        let new_values_to_apply = if let Some(ref new_values_json) = change.new_values {
+            let new_values: serde_json::Map<String, serde_json::Value> = serde_json::from_str(new_values_json)?;
+            let mut winning_attributes = serde_json::Map::new();
+            
+            // For each attribute in this change, check if it's the latest
+            for (attribute, value) in new_values {
+                if txn.is_latest_change_for_attribute(&change.entity_type, &change.entity_id, &attribute, &change.id)? {
+                    winning_attributes.insert(attribute, value);
+                }
             }
+            
+            winning_attributes
         } else {
-            None
+            serde_json::Map::new()
         };
         
-        // First check if the entity exists
-        let check_sql = format!("SELECT COUNT(*) FROM {} WHERE id = ?", change.entity_type);
-        let count: i64 = conn.query_row(&check_sql, params![&change.entity_id], |row| row.get(0))?;
-        
-        if count == 0 {
-            // Entity doesn't exist, we need to insert it
-            let insert_sql = format!(
-                "INSERT INTO {} (id, {}) VALUES (?, ?)",
-                change.entity_type, change.attribute
-            );
-            conn.execute(&insert_sql, params![&change.entity_id, &parsed_value])?;
-        } else if parsed_value.is_some() {
-            // Entity exists, update it
-            let sql = format!(
-                "UPDATE {} SET {} = ? WHERE id = ?",
-                change.entity_type, change.attribute
-            );
-            conn.execute(&sql, params![&parsed_value, &change.entity_id])?;
+        // If no attributes won the LWW check, nothing to apply
+        if new_values_to_apply.is_empty() {
+            return Ok(());
         }
+        
+        // Get the current entity state from the database if it exists
+        let conn = txn.connection();
+        let check_sql = format!("SELECT * FROM {} WHERE id = ?", change.entity_type);
+        
+        let mut stmt = conn.prepare(&check_sql)?;
+        let existing_entity = stmt.query_row(params![&change.entity_id], |row| {
+            // Convert the row to a JSON object
+            let column_count = row.as_ref().column_count();
+            let mut entity_map = serde_json::Map::new();
+            
+            for i in 0..column_count {
+                let column_name = row.as_ref().column_name(i)?;
+                // Try to get the value as different types
+                if let Ok(val) = row.get::<_, Option<String>>(i) {
+                    entity_map.insert(
+                        column_name.to_string(),
+                        val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+                    );
+                } else if let Ok(val) = row.get::<_, Option<i64>>(i) {
+                    entity_map.insert(
+                        column_name.to_string(),
+                        val.map(|v| serde_json::Value::Number(v.into())).unwrap_or(serde_json::Value::Null)
+                    );
+                } else if let Ok(val) = row.get::<_, Option<f64>>(i) {
+                    entity_map.insert(
+                        column_name.to_string(),
+                        val.and_then(|v| serde_json::Number::from_f64(v))
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null)
+                    );
+                }
+            }
+            Ok(entity_map)
+        }).optional()?;
+        
+        // Build the final entity state
+        let entity_data = if let Some(mut existing) = existing_entity {
+            // Update existing entity with only the winning attributes
+            for (key, value) in new_values_to_apply {
+                existing.insert(key, value);
+            }
+            existing
+        } else {
+            // Create new entity - need to build from old_values + winning new_values
+            let mut entity_map = serde_json::Map::new();
+            
+            // Always include the ID
+            entity_map.insert("id".to_string(), serde_json::Value::String(change.entity_id.clone()));
+            
+            // First apply old values if they exist
+            if let Some(old_json) = &change.old_values {
+                let old_map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(old_json)?;
+                for (k, v) in old_map {
+                    entity_map.insert(k, v);
+                }
+            }
+            
+            // Then apply only the winning new values
+            for (k, v) in new_values_to_apply {
+                entity_map.insert(k, v);
+            }
+            
+            entity_map
+        };
+        
+        // Use save_dynamic to apply the entity
+        txn.save_dynamic(&change.entity_type, &entity_data)?;
+        
         Ok(())
     }
 
@@ -244,7 +248,7 @@ impl SyncEngine {
             let after_id = after_change_id.unwrap_or("0");
             
             let mut stmt = conn.prepare(
-                "SELECT id, author_id, entity_type, entity_id, attribute, old_value, new_value 
+                "SELECT id, author_id, entity_type, entity_id, old_values, new_values 
                  FROM ZV_CHANGE 
                  WHERE author_id = ? AND id > ? 
                  ORDER BY id"
@@ -257,9 +261,8 @@ impl SyncEngine {
                     author_id: row.get(1)?,
                     entity_type: row.get(2)?,
                     entity_id: row.get(3)?,
-                    attribute: row.get(4)?,
-                    old_value: row.get(5)?,
-                    new_value: row.get(6)?,
+                    old_values: row.get(4)?,
+                    new_values: row.get(5)?,
                 })
             })?;
             
@@ -316,9 +319,8 @@ pub struct Change {
     pub author_id: String,
     pub entity_type: String,
     pub entity_id: String,
-    pub attribute: String,
-    pub old_value: Option<String>,
-    pub new_value: Option<String>,
+    pub old_values: Option<String>,
+    pub new_values: Option<String>,
 }
 
 #[derive(Default)]
@@ -364,14 +366,14 @@ impl SyncEngineBuilder {
     }
 }
 
+#[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{sync::SyncEngine, Db};
+    use crate::{Db, sync::SyncEngine};
 
     #[test]
-    fn basic_sync() -> Result<()> {
+    fn basic_sync() -> anyhow::Result<()> {
         let migrations = Migrations::new(vec![
             M::up("CREATE TABLE Artist (name TEXT NOT NULL, country TEXT, id TEXT NOT NULL PRIMARY KEY);"),
         ]);
@@ -419,5 +421,124 @@ mod tests {
         pub id: String,
         pub name: String,
         pub country: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+    struct Pet {
+        pub id: String,
+        pub name: String,
+        pub description: Option<String>,
+        pub rating: Option<i32>,
+        pub snack: Option<String>,
+    }
+
+    #[test]
+    fn per_attribute_lww_resolution() -> anyhow::Result<()> {
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Pet (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, description TEXT, rating INTEGER, snack TEXT);"),
+        ]);
+
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        let db3 = Db::open_memory()?;
+        
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        db3.migrate(&migrations)?;
+
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+
+        // User A inserts Pet
+        let pet_id = "pet-1".to_string();
+        db1.save(&Pet {
+            id: pet_id.clone(),
+            name: "Dog".to_string(),
+            description: Some("Bestie".to_string()),
+            rating: None,
+            snack: None,
+        })?;
+
+        // Sync to get all replicas in sync
+        sync_engine.sync(&db1)?;
+        sync_engine.sync(&db2)?;
+        sync_engine.sync(&db3)?;
+        sync_engine.sync(&db1)?;
+        sync_engine.sync(&db2)?;
+
+        // Simulate different users making changes to different attributes
+        // User B (db2) changes rating
+        db2.save(&Pet {
+            id: pet_id.clone(),
+            name: "Dog".to_string(),
+            description: Some("Bestie".to_string()),
+            rating: Some(12),
+            snack: None,
+        })?;
+
+        // User C (db3) changes snack  
+        db3.save(&Pet {
+            id: pet_id.clone(),
+            name: "Dog".to_string(),
+            description: Some("Bestie".to_string()),
+            rating: None,
+            snack: Some("Biscuit".to_string()),
+        })?;
+
+        // User B (db2) changes snack again (should win over User C due to later timestamp)
+        std::thread::sleep(std::time::Duration::from_millis(1)); // Ensure different timestamp
+        db2.save(&Pet {
+            id: pet_id.clone(),
+            name: "Dog".to_string(),
+            description: Some("Bestie".to_string()),
+            rating: Some(12),
+            snack: Some("Bone".to_string()),
+        })?;
+
+        // User C (db3) changes rating (should win over User B's first rating change)
+        std::thread::sleep(std::time::Duration::from_millis(1)); // Ensure different timestamp
+        db3.save(&Pet {
+            id: pet_id.clone(),
+            name: "Dog".to_string(),
+            description: Some("Bestie".to_string()),
+            rating: Some(13),
+            snack: Some("Biscuit".to_string()),
+        })?;
+
+        // Sync everything
+        sync_engine.sync(&db1)?;
+        sync_engine.sync(&db2)?;
+        sync_engine.sync(&db3)?;
+        sync_engine.sync(&db1)?;
+        sync_engine.sync(&db2)?;
+        sync_engine.sync(&db3)?;
+
+        // Check final state - should have per-attribute LWW
+        // Expected: rating=13 (from User C's latest change), snack=Bone (from User B's latest change)
+        let final_pet1: Option<Pet> = db1.get(&pet_id)?;
+        let final_pet2: Option<Pet> = db2.get(&pet_id)?;
+        let final_pet3: Option<Pet> = db3.get(&pet_id)?;
+
+        assert!(final_pet1.is_some());
+        assert!(final_pet2.is_some());
+        assert!(final_pet3.is_some());
+
+        let pet1 = final_pet1.unwrap();
+        let pet2 = final_pet2.unwrap();
+        let pet3 = final_pet3.unwrap();
+
+        // All replicas should have identical final state
+        assert_eq!(pet1.name, "Dog");
+        assert_eq!(pet1.description, Some("Bestie".to_string()));
+        assert_eq!(pet1.rating, Some(13)); // User C's last rating change should win
+        assert_eq!(pet1.snack, Some("Bone".to_string())); // User B's last snack change should win
+
+        assert_eq!(pet1.rating, pet2.rating);
+        assert_eq!(pet1.snack, pet2.snack);
+        assert_eq!(pet1.rating, pet3.rating);
+        assert_eq!(pet1.snack, pet3.snack);
+
+        Ok(())
     }
 }

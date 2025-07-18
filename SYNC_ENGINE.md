@@ -8,8 +8,8 @@
 
 ## Conflict Resolution
 
-Conflicts are resolved using **Last-Write-Wins (LWW) per attribute** based on the UUIDv7 change ID. Since UUIDv7 includes a timestamp component and is lexicographically sortable, the change with the highest ID wins. This provides a deterministic conflict resolution strategy across all replicas without requiring coordination. 
-
+Conflicts are resolved using **Last-Write-Wins (LWW) per attribute** based on
+the UUIDv7 change ID. 
 
 # Sync Storage
 
@@ -17,8 +17,7 @@ Each replica stores a metadata file and one or more change files in the storage.
 
 The metadata includes information about the last file and changes uploaded so that other replicas can quickly determine if there are new changes to sync.
 
-The change files contain an array of one or more change records. The filename
-is a new UUIDv7 generated when the file is created (not the ID of any change within the file).
+The change files contain an array of one or more change records. The filename is a new UUIDv7 generated when the file is created.
 
 ## Directory Structure
 
@@ -33,7 +32,7 @@ memory://base_path
         └── {change_uuid}.json
 ```
 
-## Important Prefixes
+## Useful Prefixes
 
 ```
 replicas = list("replicas/")
@@ -59,41 +58,27 @@ CREATE TABLE IF NOT EXISTS ZV_CHANGE (
 	author_id TEXT NOT NULL,
 	entity_type TEXT NOT NULL,
 	entity_id TEXT NOT NULL,
-	attribute TEXT NOT NULL,
-	old_value TEXT,
-	new_value TEXT
+	old_values TEXT,
+	new_values TEXT
 );
 ```
 
 ## Data Structures
 
-### ReplicaMetadata
+### Replica Metadata
+
 Stored in `replicas/{replica_uuid}.json`:
 ```json
-{
-  "replica_id": "550e8400-e29b-41d4-a716-446655440000",
-  "latest_change_id": "01928374-5678-7234-b567-123456789abc",
-  "latest_change_file": "01928374-9012-7456-b789-456789012def"
-}
+TODO document
 ```
 
 ### Change File Format
+
 Stored in `changes/{replica_uuid}/{change_file_uuid}.json`:
 ```json
-{
-  "replica_id": "550e8400-e29b-41d4-a716-446655440000",
-  "changes": [
-    {
-      "id": "01928374-5678-7234-b567-123456789abc",
-      "author_id": "550e8400-e29b-41d4-a716-446655440000",
-      "entity_type": "Artist",
-      "entity_id": "987654321-dcba-4321-fedc-ba9876543210",
-      "attribute": "name",
-      "old_value": "\"Metallica\"",
-      "new_value": "\"Metallica (Updated)\""
-    }
-  ]
-}
+TODO document
 ```
 
-Note: Values in `old_value` and `new_value` are JSON-encoded strings.
+## Sync Algorithm
+
+TODO document
