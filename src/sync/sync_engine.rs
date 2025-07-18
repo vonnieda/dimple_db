@@ -23,6 +23,18 @@ impl SyncEngine {
     pub fn sync(&self, db: &Db) -> Result<()> {
         // TODO note changes are potentially very large and we're just
         // loading them all into memory
+        // TODO we aren't receiving notifications, or firing subscriptions, for
+        // stuff updated by sync. I think we should use DbTransaction.save_untracked
+        // if possible so there is only one place where this all happens.
+        // TODO we can't handle NOT NULL when creating a new object from sync
+        // it might be best to just use old_values and new_values, instead of
+        // singular. 
+        // So, this is why we had ZV_TRANSACTION in the first place and it occurs
+        // to me now that they were just representing different things, which
+        // was fine. A DbTransaction is a set, really, of ZV_TRANSACTION
+        // but it would probably be best to just change Zv_TRANSACTION and
+        // ZV_CHANGE to like ZV_CHANGE and ZV_CHANGE_COLUMN or just put a
+        // blob containing all the changed columns in ZV_CHANGE.
         self.pull(db)?;
         self.push(db)?;
         Ok(())
@@ -43,7 +55,7 @@ impl SyncEngine {
         Ok(())
     }
     
-    fn pull_replica_changes(&self, db: &Db, replica: &ReplicaInfo) -> Result<()> {
+    fn pull_replica_changes(&self, db: &Db, replica: &ReplicaMetadata) -> Result<()> {
         let latest_change_id = self.get_latest_change_for_replica(db, &replica.replica_id)?;
         
         let change_files = self.list_change_files(&replica.replica_id)?;
@@ -94,14 +106,14 @@ impl SyncEngine {
         Ok(change_files)
     }
     
-    fn download_change_file(&self, replica_id: &str, change_file: &str) -> Result<ChangeBundle> {
+    fn download_change_file(&self, replica_id: &str, change_file: &str) -> Result<Changes> {
         let path = format!("changes/{}/{}.json", replica_id, change_file);
         let data = self.storage.get(&path)?;
-        let bundle: ChangeBundle = serde_json::from_slice(&data)?;
+        let bundle: Changes = serde_json::from_slice(&data)?;
         Ok(bundle)
     }
     
-    fn apply_changes(&self, db: &Db, bundle: ChangeBundle) -> Result<()> {
+    fn apply_changes(&self, db: &Db, bundle: Changes) -> Result<()> {
         db.transaction(|txn| {
             let conn = txn.connection();
             
@@ -193,7 +205,7 @@ impl SyncEngine {
         }
         
         let change_file_id = Uuid::now_v7().to_string();
-        let bundle = ChangeBundle {
+        let bundle = Changes {
             replica_id: my_replica_id.clone(),
             changes: unpushed_changes,
         };
@@ -205,7 +217,7 @@ impl SyncEngine {
         let change_path = format!("changes/{}/{}.json", my_replica_id, change_file_id);
         self.storage.put(&change_path, &data)?;
         
-        let replica_info = ReplicaInfo {
+        let replica_info = ReplicaMetadata {
             replica_id: my_replica_id.clone(),
             latest_change_id: last_change_id,
             latest_change_file: change_file_id,
@@ -217,7 +229,7 @@ impl SyncEngine {
     }
     
     fn get_latest_pushed_change(&self, replica_id: &str) -> Result<Option<String>> {
-        match self.get_replica_info(replica_id) {
+        match self.get_replica_metadata(replica_id) {
             Ok(info) => Ok(Some(info.latest_change_id)),
             Err(_) => Ok(None),
         }
@@ -259,10 +271,10 @@ impl SyncEngine {
         })
     }
 
-    fn get_replicas(&self) -> Result<Vec<ReplicaInfo>> {
+    fn get_replicas(&self) -> Result<Vec<ReplicaMetadata>> {
         let replicas = self.list_replica_ids()?.iter()
             // TODO log or mark the ones that error
-            .filter_map(|replica_id| self.get_replica_info(replica_id).ok())
+            .filter_map(|replica_id| self.get_replica_metadata(replica_id).ok())
             .collect::<Vec<_>>();
         Ok(replicas)
     }
@@ -279,21 +291,21 @@ impl SyncEngine {
         Ok(replica_ids)
     }
 
-    fn get_replica_info(&self, replica_id: &str) -> Result<ReplicaInfo> {
+    fn get_replica_metadata(&self, replica_id: &str) -> Result<ReplicaMetadata> {
         let data = self.storage.get(&format!("replicas/{}.json", replica_id))?;
         Ok(serde_json::from_slice(&data)?)
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct ReplicaInfo {
+pub struct ReplicaMetadata {
     pub replica_id: String,
     pub latest_change_id: String,
     pub latest_change_file: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct ChangeBundle {
+pub struct Changes {
     pub replica_id: String,
     pub changes: Vec<Change>,
 }

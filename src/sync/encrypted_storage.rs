@@ -12,6 +12,16 @@ use crate::sync::{ArcStorage, SyncStorage};
 /// File paths are stored in plaintext for simplicity. The security benefit
 /// of encrypting paths is minimal since they only reveal that someone is
 /// using Dimple Data for synchronization.
+/// 
+/// TODO age doesn't provide authentication (signing) and I need to think that
+/// through a little more:
+/// https://words.filippo.io/age-authentication/
+/// > In short, while no one can modify an encrypted age file, anyone can
+/// > replace it with a completely new encrypted file. (If the public key is
+/// > shared)
+/// https://github.com/jedisct1/minisign
+/// Okay so I guess I can just go the extra step of using minisign if I need
+/// to https://github.com/jedisct1/rust-minisign
 #[derive(Clone)]
 pub struct EncryptedStorage {
     inner: ArcStorage,

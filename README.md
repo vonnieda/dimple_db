@@ -33,7 +33,7 @@ files, which are encrypted with [age](https://github.com/FiloSottile/age).
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
 
-See more about the design in [[SYNC_ENGINE.md]].
+See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 
 
 # Inspiration and Research

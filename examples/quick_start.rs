@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dimple_db::Db;
+use dimple_db::{sync::SyncEngine, Db};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 
@@ -28,13 +28,29 @@ fn main() -> Result<()> {
         M::up("
             CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);
             CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE Genre (id TEXT PRIMARY KEY, name TEXT NOT NULL);
             CREATE TABLE AlbumArtist (
                 id TEXT PRIMARY KEY, 
-                album_id TEXT NOT NULL, 
-                artist_id TEXT NOT NULL, 
+                album_id TEXT, 
+                artist_id TEXT, 
                 FOREIGN KEY (album_id) REFERENCES Album(id),
                 FOREIGN KEY (artist_id) REFERENCES Artist(id)
-            );"),
+            );
+            CREATE TABLE ArtistGenre (
+                id TEXT PRIMARY KEY, 
+                artist_id TEXT, 
+                genre_id TEXT, 
+                FOREIGN KEY (artist_id) REFERENCES Artist(id),
+                FOREIGN KEY (genre_id) REFERENCES Genre(id)
+            );
+            CREATE TABLE AlbumGenre (
+                id TEXT PRIMARY KEY, 
+                album_id TEXT, 
+                genre_id TEXT, 
+                FOREIGN KEY (album_id) REFERENCES Album(id),
+                FOREIGN KEY (genre_id) REFERENCES Genre(id)
+            );
+        "),
         M::up("ALTER TABLE Artist ADD COLUMN summary TEXT;"),
     ]);
 
@@ -69,18 +85,15 @@ fn main() -> Result<()> {
     let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
         println!("Albums by Metallica: {:?}", albums);
     })?;
-    // Subscription will live as long as _sub does.
 
+    let sync = SyncEngine::builder()
+        .in_memory()
+        // .encrypted("correct horse battery staple")
+        .build()?;
+    sync.sync(&db1)?;
+    sync.sync(&db2)?;
 
-    // TODO sync not yet implemented
-    // let sync = SyncEngine::builder()
-    //     .in_memory()
-    //     .encrypted("correct horse battery staple")
-    //     .build()?;
-    // sync.sync(&db1)?;
-    // sync.sync(&db2)?;
-
-    // assert!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len() == 1);
+    assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 1);
 
     Ok(())
 }
