@@ -1,6 +1,6 @@
 # Sync Engine
 
-1. All changes to entities are tracked in the **change log**, which is in [ZV_CHANGE and associated tables](#sync-schema).
+1. All changes to entities are tracked in the **change log**, which is in [ZV_CHANGE and associated tables](#sync-schema). 
 2. Each **replica** keeps a complete merged copy of the change log.
 3. Each change includes a [UUIDv7](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format) which acts as a [hybrid logical clock](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html), providing a global order across all replicas.
 4. During a sync, a replica **pulls** new changes from other replicas and **pushes** new local changes made since the last sync.
