@@ -1,7 +1,7 @@
 use anyhow::Result;
 use s3::{creds::Credentials, Bucket, Region};
 
-use crate::sync::SyncStorage;
+use super::SyncStorage;
 
 pub struct S3Storage {
     bucket: Bucket,

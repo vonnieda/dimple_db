@@ -160,20 +160,13 @@ impl Db {
             INSERT OR IGNORE INTO ZV_METADATA (key, value) 
                 VALUES ('database_uuid', uuid7());
 
-            CREATE TABLE IF NOT EXISTS ZV_TRANSACTION (
-                id TEXT NOT NULL PRIMARY KEY,
-                author TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS ZV_CHANGE (
                 id TEXT NOT NULL PRIMARY KEY,
-                transaction_id TEXT NOT NULL,
+                author_id TEXT NOT NULL,
                 entity_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
-                attribute TEXT NOT NULL,
-                old_value TEXT,
-                new_value TEXT,
-                FOREIGN KEY (transaction_id) REFERENCES ZV_TRANSACTION(id)
+                old_values TEXT,
+                new_values TEXT
             );
         ")?;
         Ok(())
@@ -235,7 +228,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::db::Db;
-    use crate::db::types::{ChangeTransaction, ChangeRecord, DbEvent};
+    use crate::db::types::{ChangeRecord, DbEvent};
 
     fn setup_db() -> Result<Db> {
         let db = Db::open_memory()?;
@@ -246,25 +239,15 @@ mod tests {
         Ok(db)
     }
 
-    fn get_transactions(db: &Db) -> Result<Vec<ChangeTransaction>> {
-        db.query("SELECT id, author FROM ZV_TRANSACTION ORDER BY id", [])
-    }
 
     fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangeRecord>> {
         db.query(
-            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
-             FROM ZV_CHANGE WHERE entity_id = ? ORDER BY attribute",
+            "SELECT id, author_id, entity_type, entity_id, old_values, new_values 
+             FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",
             [entity_id]
         )
     }
 
-    fn get_changes_for_attribute(db: &Db, entity_id: &str, attribute: &str) -> Result<Vec<ChangeRecord>> {
-        db.query(
-            "SELECT id, transaction_id, entity_type, entity_id, attribute, old_value, new_value 
-             FROM ZV_CHANGE WHERE entity_id = ? AND attribute = ? ORDER BY id",
-            [entity_id, attribute]
-        )
-    }
 
     // Database Operations
     #[test]
@@ -316,13 +299,13 @@ mod tests {
         let artist = db.save(&Artist { name: "Radiohead".to_string(), ..Default::default() })?;
         
         let changes = get_changes(&db, &artist.id)?;
-        assert_eq!(changes.len(), 2); // name and summary
-        assert_eq!(changes[0].attribute, "name");
-        assert_eq!(changes[0].old_value, None);
-        assert_eq!(changes[0].new_value, Some("\"Radiohead\"".to_string()));
-        assert_eq!(changes[1].attribute, "summary");
-        assert_eq!(changes[1].old_value, None);
-        assert_eq!(changes[1].new_value, None);
+        assert_eq!(changes.len(), 1); // One change record for the entity
+        assert_eq!(changes[0].old_values, None);
+        assert!(changes[0].new_values.is_some());
+        
+        // Check that new_values contains the name
+        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
+        assert_eq!(new_values["name"], "Radiohead");
         Ok(())
     }
 
@@ -337,27 +320,16 @@ mod tests {
             summary: Some("Rock band".to_string()), // changed
         })?;
         
-        let summary_changes = get_changes_for_attribute(&db, &artist.id, "summary")?;
-        assert_eq!(summary_changes.len(), 2); // insert + update
-        assert_eq!(summary_changes[1].old_value, None);
-        assert_eq!(summary_changes[1].new_value, Some("\"Rock band\"".to_string()));
+        let changes = get_changes(&db, &artist.id)?;
+        assert_eq!(changes.len(), 2); // insert + update
+        
+        // Check the update change only contains the modified field
+        let update_new_values: serde_json::Value = serde_json::from_str(&changes[1].new_values.as_ref().unwrap())?;
+        assert_eq!(update_new_values["summary"], "Rock band");
+        assert!(update_new_values.get("name").is_none()); // name wasn't changed
         Ok(())
     }
 
-    #[test]
-    fn multiple_saves_in_transaction_share_transaction_id() -> Result<()> {
-        let db = setup_db()?;
-        let artist = db.transaction(|txn| {
-            let mut artist = txn.save(&Artist::default())?;
-            artist.name = "Tool".to_string();
-            txn.save(&artist)
-        })?;
-        
-        let changes = get_changes(&db, &artist.id)?;
-        let transaction_id = &changes[0].transaction_id;
-        assert!(changes.iter().all(|c| c.transaction_id == *transaction_id));
-        Ok(())
-    }
 
     #[test]
     fn none_values_stored_as_sql_null() -> Result<()> {
@@ -368,21 +340,27 @@ mod tests {
             ..Default::default() 
         })?;
         
-        let summary_changes = get_changes_for_attribute(&db, &artist.id, "summary")?;
-        assert_eq!(summary_changes.len(), 1);
-        assert!(summary_changes[0].old_value.is_none());
-        assert!(summary_changes[0].new_value.is_none());
+        let changes = get_changes(&db, &artist.id)?;
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].old_values.is_none());
+        assert!(changes[0].new_values.is_some());
+        
+        // Check that summary is not included in new_values (it's null)
+        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
+        assert_eq!(new_values["name"], "Nirvana");
+        assert!(new_values.get("summary").is_none() || new_values["summary"].is_null());
         Ok(())
     }
 
     #[test]
     fn author_is_database_uuid() -> Result<()> {
         let db = setup_db()?;
-        let _ = db.save(&Artist::default())?;
+        let artist = db.save(&Artist::default())?;
         
-        let transactions = get_transactions(&db)?;
-        assert_eq!(transactions.len(), 1);
-        assert!(uuid::Uuid::parse_str(&transactions[0].author).is_ok());
+        let changes = get_changes(&db, &artist.id)?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].author_id, db.get_database_uuid()?);
+        assert!(uuid::Uuid::parse_str(&changes[0].author_id).is_ok());
         Ok(())
     }
 
@@ -402,8 +380,12 @@ mod tests {
         })?;
         
         let changes = get_changes(&db, &artist.id)?;
-        assert_eq!(changes.len(), 1); // only name
-        assert_eq!(changes[0].attribute, "name");
+        assert_eq!(changes.len(), 1);
+        
+        // Check that only name is in new_values (summary column doesn't exist)
+        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
+        assert_eq!(new_values["name"], "Tool");
+        assert!(new_values.get("summary").is_none());
         Ok(())
     }
 
@@ -473,13 +455,69 @@ mod tests {
         let db = setup_db()?;
         let artist = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
         
-        let transactions = get_transactions(&db)?;
         let changes = get_changes(&db, &artist.id)?;
         
-        assert_eq!(transactions.len(), 1);
-        assert_eq!(changes.len(), 2);
+        assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].entity_type, "Artist");
-        assert_eq!(changes[0].transaction_id, transactions[0].id);
+        assert_eq!(changes[0].author_id, db.get_database_uuid()?);
+        Ok(())
+    }
+
+    #[test]
+    fn null_values_included_in_changes() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Save an entity with an explicit null value
+        let artist = db.save(&Artist { 
+            name: "Test Artist".to_string(), 
+            summary: None, // This should be included as null in changes
+            ..Default::default() 
+        })?;
+        
+        let changes = get_changes(&db, &artist.id)?;
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].new_values.is_some());
+        
+        // Parse the new_values JSON to check it includes the null field
+        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
+        assert_eq!(new_values["name"], "Test Artist");
+        // The key point: summary should be present as null, not missing
+        assert!(new_values.get("summary").is_some(), "summary field should be present");
+        assert!(new_values["summary"].is_null(), "summary field should be null");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn null_to_value_change_tracking() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Start with an entity that has a null summary
+        let artist = db.save(&Artist { 
+            name: "Test Artist".to_string(), 
+            summary: None,
+            ..Default::default() 
+        })?;
+        
+        // Update it to have a non-null summary
+        let updated_artist = db.save(&Artist {
+            id: artist.id.clone(),
+            name: "Test Artist".to_string(),
+            summary: Some("Now has a summary".to_string()),
+        })?;
+        
+        let changes = get_changes(&db, &updated_artist.id)?;
+        assert_eq!(changes.len(), 2); // insert + update
+        
+        // Check the update change
+        let update_change = &changes[1];
+        let new_values: serde_json::Value = serde_json::from_str(&update_change.new_values.as_ref().unwrap())?;
+        let old_values: serde_json::Value = serde_json::from_str(&update_change.old_values.as_ref().unwrap())?;
+        
+        // Should track the change from null to "Now has a summary"
+        assert_eq!(new_values["summary"], "Now has a summary");
+        assert!(old_values["summary"].is_null());
+        
         Ok(())
     }
 

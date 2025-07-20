@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Params, Transaction};
+use rusqlite::{Params, Transaction, params};
 use uuid::Uuid;
 use std::cell::RefCell;
 
@@ -7,8 +7,7 @@ use crate::db::{Db, Entity, types::DbEvent};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
-    txn: &'a Transaction<'a>,
-    id: String,
+    pub txn: &'a Transaction<'a>,
     pending_events: RefCell<Vec<DbEvent>>,
 }
 
@@ -17,9 +16,12 @@ impl<'a> DbTransaction<'a> {
         Self {
             db,
             txn,
-            id: Uuid::now_v7().to_string(),
             pending_events: RefCell::new(Vec::new()),
         }
+    }
+    
+    pub fn connection(&self) -> &rusqlite::Connection {
+        self.txn
     }
 
     /// Saves the entity to the database. 
@@ -40,6 +42,38 @@ impl<'a> DbTransaction<'a> {
 
     pub fn save_untracked<E: Entity>(&self, entity: &E) -> Result<E> {
         self.save_internal(entity, false)
+    }
+    
+    /// Save a dynamic entity when we know the table name but not the type.
+    /// This is used by sync operations where we need to save entities without compile-time type information.
+    pub fn save_dynamic(&self, table_name: &str, entity_data: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+        let column_names = self.db.table_column_names(self.txn, table_name)?;
+        
+        // Convert map to Value
+        let mut new_value = serde_json::Value::Object(entity_data.clone());
+        let id = self.ensure_entity_id(&mut new_value)?;
+        
+        // Check if entity exists
+        let check_sql = format!("SELECT COUNT(*) FROM {} WHERE id = ?", table_name);
+        let exists: bool = self.txn.query_row(&check_sql, params![&id], |row| {
+            row.get::<_, i64>(0).map(|count| count > 0)
+        })?;
+        
+        if exists {
+            self.update_entity(table_name, &column_names, &new_value)?;
+        } else {
+            self.insert_entity(table_name, &column_names, &new_value)?;
+        }
+        
+        // Queue event for notification after commit
+        let event = if exists {
+            DbEvent::Update(table_name.to_string(), id.clone())
+        } else {
+            DbEvent::Insert(table_name.to_string(), id.clone())
+        };
+        self.pending_events.borrow_mut().push(event);
+        
+        Ok(())
     }
 
     fn save_internal<E: Entity>(&self, entity: &E, track_changes: bool) -> Result<E> {
@@ -144,59 +178,75 @@ impl<'a> DbTransaction<'a> {
             new_entity: &serde_json::Value,
             column_names: &[String]) -> Result<()> {
         
+        let author_id = self.db.get_database_uuid()?;
+        
+        // Compute the diff between old and new entities
+        let (old_values, new_values) = self.compute_entity_diff(old_entity, new_entity, column_names);
+        
+        // Only create a change record if there are actual changes
+        if !old_values.is_empty() || !new_values.is_empty() {
+            let change_id = Uuid::now_v7().to_string();
+            
+            // Convert maps to JSON strings
+            let old_values_str = if old_values.is_empty() { 
+                None 
+            } else { 
+                Some(serde_json::to_string(&old_values)?) 
+            };
+            
+            let new_values_str = if new_values.is_empty() { 
+                None 
+            } else { 
+                Some(serde_json::to_string(&new_values)?) 
+            };
+            
+            self.txn.execute(
+                "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    &change_id,
+                    &author_id,
+                    table_name,
+                    entity_id,
+                    old_values_str,
+                    new_values_str,
+                ]
+            )?;
+        }
+        
+        Ok(())
+    }
     
-        // Get database_uuid to use as author
-        let database_uuid = self.db.get_database_uuid()?;
+    /// Compute the diff between old and new entities, returning only changed fields
+    fn compute_entity_diff(&self, old_entity: Option<&serde_json::Value>, 
+                          new_entity: &serde_json::Value,
+                          column_names: &[String]) -> (serde_json::Map<String, serde_json::Value>, 
+                                                       serde_json::Map<String, serde_json::Value>) {
+        let mut old_values = serde_json::Map::new();
+        let mut new_values = serde_json::Map::new();
         
-        self.txn.execute(
-            "INSERT OR IGNORE INTO ZV_TRANSACTION (id, author) VALUES (?, ?)",
-            [&self.id, &database_uuid]
-        )?;
-        
-        // Track changes for each column (except id)
         for column_name in column_names {
             if column_name == "id" {
                 continue;
             }
             
-            // Convert JSON null to None, other values to their string representation
-            let old_value = old_entity
-                .and_then(|e| e.get(column_name))
-                .and_then(|v| match v {
-                    serde_json::Value::Null => None,
-                    _ => Some(v.to_string())
-                });
-                
-            let new_value = new_entity
-                .get(column_name)
-                .and_then(|v| match v {
-                    serde_json::Value::Null => None,
-                    _ => Some(v.to_string())
-                });
+            let old_value = old_entity.and_then(|e| e.get(column_name));
+            let new_value = new_entity.get(column_name);
             
             // Track all values on insert, only changes on update
             let is_insert = old_entity.is_none();
-            let should_track = is_insert || (old_value != new_value);
-            if should_track {
-                let change_id = Uuid::now_v7().to_string();
-                
-                // Use rusqlite's support for Option to store NULL values properly
-                self.txn.execute(
-                    "INSERT INTO ZV_CHANGE (id, transaction_id, entity_type, entity_id, attribute, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    rusqlite::params![
-                        &change_id,
-                        &self.id,
-                        table_name,
-                        entity_id,
-                        column_name,
-                        old_value.as_deref(),
-                        new_value.as_deref(),
-                    ]
-                )?;
+            let values_differ = old_value != new_value;
+            
+            if is_insert || values_differ {
+                if let Some(old_val) = old_value {
+                    old_values.insert(column_name.clone(), old_val.clone());
+                }
+                if let Some(new_val) = new_value {
+                    new_values.insert(column_name.clone(), new_val.clone());
+                }
             }
         }
         
-        Ok(())
+        (old_values, new_values)
     }
 
     pub(crate) fn take_pending_events(&self) -> Vec<DbEvent> {

@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use anyhow::Result;
 
-use crate::sync::SyncStorage;
+use super::SyncStorage;
 
 pub struct LocalStorage {
     base_path: String,

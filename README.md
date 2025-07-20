@@ -1,11 +1,10 @@
 # DimpleDb
 
-DimpleDb is a reactive SQLite database wrapper for Rust that provides:
-DimpleDb is a reactive data store and sync engine for Rust.
+DimpleDb is a reactive data store and sync engine for Rust, based on SQLite.
 
 - Plain SQL for queries, schemas, and migrations.
 - Simple query-to-struct mapping with serde.
-- Automatic history tracking.
+- Automatic change tracking.
 - Reactive queries with live updates.
 - Multi-author encrypted sync via any S3 compatible endpoint.
 
@@ -32,6 +31,8 @@ files, which are encrypted with [age](https://github.com/FiloSottile/age).
 
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
+
+See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 
 
 # Inspiration and Research
