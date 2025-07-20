@@ -3,7 +3,7 @@ use std::sync::{Arc};
 use age::secrecy::SecretString;
 use anyhow::Result;
 
-use crate::sync::{ArcStorage, SyncStorage};
+use super::{ArcStorage, SyncStorage};
 
 /// EncryptedStorage transparently encrypts another Storage using age with
 /// passphrase-derived keys
@@ -63,7 +63,7 @@ impl SyncStorage for EncryptedStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sync::memory_storage::InMemoryStorage;
+    use crate::sync::storage::InMemoryStorage;
 
     #[test]
     fn encrypt_decrypt_roundtrip() -> Result<()> {

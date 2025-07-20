@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{Arc, RwLock}};
 
 use anyhow::Result;
 
-use crate::sync::SyncStorage;
+use super::SyncStorage;
 
 pub struct InMemoryStorage {
     data: Arc<RwLock<HashMap<String, Vec<u8>>>>,

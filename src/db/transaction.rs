@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Params, Transaction, params, OptionalExtension};
+use rusqlite::{Params, Transaction, params};
 use uuid::Uuid;
 use std::cell::RefCell;
 
@@ -7,7 +7,7 @@ use crate::db::{Db, Entity, types::DbEvent};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
-    txn: &'a Transaction<'a>,
+    pub txn: &'a Transaction<'a>,
     pending_events: RefCell<Vec<DbEvent>>,
 }
 
@@ -22,59 +22,6 @@ impl<'a> DbTransaction<'a> {
     
     pub fn connection(&self) -> &rusqlite::Connection {
         self.txn
-    }
-    
-    /// Get the latest change ID for a given author (replica)
-    pub fn get_latest_change_for_author(&self, author_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.txn.prepare(
-            "SELECT id FROM ZV_CHANGE 
-             WHERE author_id = ? 
-             ORDER BY id DESC 
-             LIMIT 1"
-        )?;
-        
-        let result = stmt.query_row(params![author_id], |row| {
-            row.get::<_, String>(0)
-        }).optional()?;
-        
-        Ok(result)
-    }
-    
-    /// Check if a change is the latest for a given attribute
-    pub fn is_latest_change_for_attribute(&self, entity_type: &str, entity_id: &str, attribute: &str, change_id: &str) -> Result<bool> {
-        let mut stmt = self.txn.prepare(
-            "SELECT id FROM ZV_CHANGE 
-             WHERE entity_type = ? AND entity_id = ? 
-             AND (json_type(old_values, ?) IS NOT NULL OR json_type(new_values, ?) IS NOT NULL)
-             ORDER BY id DESC 
-             LIMIT 1"
-        )?;
-        
-        let json_path = format!("$.{}", attribute);
-        let latest_id: String = stmt.query_row(
-            params![entity_type, entity_id, &json_path, &json_path],
-            |row| row.get(0)
-        ).unwrap_or_else(|_| change_id.to_string());
-        
-        Ok(latest_id <= change_id.to_string())
-    }
-    
-    
-    /// Insert a change record into ZV_CHANGE
-    pub fn insert_change(&self, change: &crate::sync::Change) -> Result<()> {
-        self.txn.execute(
-            "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values) 
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                &change.id,
-                &change.author_id,
-                &change.entity_type,
-                &change.entity_id,
-                &change.old_values,
-                &change.new_values,
-            ]
-        )?;
-        Ok(())
     }
 
     /// Saves the entity to the database. 
@@ -97,7 +44,8 @@ impl<'a> DbTransaction<'a> {
         self.save_internal(entity, false)
     }
     
-    /// Save a dynamic entity when we know the table name but not the type
+    /// Save a dynamic entity when we know the table name but not the type.
+    /// This is used by sync operations where we need to save entities without compile-time type information.
     pub fn save_dynamic(&self, table_name: &str, entity_data: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
         let column_names = self.db.table_column_names(self.txn, table_name)?;
         
@@ -230,41 +178,13 @@ impl<'a> DbTransaction<'a> {
             new_entity: &serde_json::Value,
             column_names: &[String]) -> Result<()> {
         
-        // Get database_uuid to use as author
         let author_id = self.db.get_database_uuid()?;
         
-        // Build old_values and new_values JSON objects containing only changed fields
-        let mut old_values = serde_json::Map::new();
-        let mut new_values = serde_json::Map::new();
-        let mut has_changes = false;
-        
-        for column_name in column_names {
-            if column_name == "id" {
-                continue;
-            }
-            
-            let old_value = old_entity.and_then(|e| e.get(column_name));
-            let new_value = new_entity.get(column_name);
-            
-            // Track all values on insert, only changes on update
-            let is_insert = old_entity.is_none();
-            let values_differ = old_value != new_value;
-            
-            if is_insert || values_differ {
-                has_changes = true;
-                
-                // Store the actual JSON values (not converted to strings)
-                if let Some(old_val) = old_value {
-                    old_values.insert(column_name.clone(), old_val.clone());
-                }
-                if let Some(new_val) = new_value {
-                    new_values.insert(column_name.clone(), new_val.clone());
-                }
-            }
-        }
+        // Compute the diff between old and new entities
+        let (old_values, new_values) = self.compute_entity_diff(old_entity, new_entity, column_names);
         
         // Only create a change record if there are actual changes
-        if has_changes {
+        if !old_values.is_empty() || !new_values.is_empty() {
             let change_id = Uuid::now_v7().to_string();
             
             // Convert maps to JSON strings
@@ -294,6 +214,39 @@ impl<'a> DbTransaction<'a> {
         }
         
         Ok(())
+    }
+    
+    /// Compute the diff between old and new entities, returning only changed fields
+    fn compute_entity_diff(&self, old_entity: Option<&serde_json::Value>, 
+                          new_entity: &serde_json::Value,
+                          column_names: &[String]) -> (serde_json::Map<String, serde_json::Value>, 
+                                                       serde_json::Map<String, serde_json::Value>) {
+        let mut old_values = serde_json::Map::new();
+        let mut new_values = serde_json::Map::new();
+        
+        for column_name in column_names {
+            if column_name == "id" {
+                continue;
+            }
+            
+            let old_value = old_entity.and_then(|e| e.get(column_name));
+            let new_value = new_entity.get(column_name);
+            
+            // Track all values on insert, only changes on update
+            let is_insert = old_entity.is_none();
+            let values_differ = old_value != new_value;
+            
+            if is_insert || values_differ {
+                if let Some(old_val) = old_value {
+                    old_values.insert(column_name.clone(), old_val.clone());
+                }
+                if let Some(new_val) = new_value {
+                    new_values.insert(column_name.clone(), new_val.clone());
+                }
+            }
+        }
+        
+        (old_values, new_values)
     }
 
     pub(crate) fn take_pending_events(&self) -> Vec<DbEvent> {

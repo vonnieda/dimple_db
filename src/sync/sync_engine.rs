@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use rusqlite::{params, OptionalExtension};
 
-use crate::{db::Db, sync::{encrypted_storage::EncryptedStorage, local_storage::LocalStorage, memory_storage::InMemoryStorage, s3_storage::S3Storage, SyncStorage}};
+use crate::{db::Db, sync::{EncryptedStorage, LocalStorage, InMemoryStorage, S3Storage, SyncStorage}};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -63,7 +63,18 @@ impl SyncEngine {
     
     fn get_latest_change_for_replica(&self, db: &Db, replica_id: &str) -> Result<Option<String>> {
         db.transaction(|txn| {
-            txn.get_latest_change_for_author(replica_id)
+            let mut stmt = txn.txn.prepare(
+                "SELECT id FROM ZV_CHANGE 
+                 WHERE author_id = ? 
+                 ORDER BY id DESC 
+                 LIMIT 1"
+            )?;
+            
+            let result = stmt.query_row(params![replica_id], |row| {
+                row.get::<_, String>(0)
+            }).optional()?;
+            
+            Ok(result)
         })
     }
     
@@ -92,7 +103,18 @@ impl SyncEngine {
         db.transaction(|txn| {
             for change in bundle.changes {
                 // First insert the change into ZV_CHANGE
-                txn.insert_change(&change)?;
+                txn.txn.execute(
+                    "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values) 
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                    params![
+                        &change.id,
+                        &change.author_id,
+                        &change.entity_type,
+                        &change.entity_id,
+                        &change.old_values,
+                        &change.new_values,
+                    ]
+                )?;
                 
                 // Always apply changes, but only apply winning attributes
                 self.apply_change_to_entity(txn, &change)?;
@@ -111,7 +133,7 @@ impl SyncEngine {
             
             // For each attribute in this change, check if it's the latest
             for (attribute, value) in new_values {
-                if txn.is_latest_change_for_attribute(&change.entity_type, &change.entity_id, &attribute, &change.id)? {
+                if self.is_latest_change_for_attribute(txn, &change.entity_type, &change.entity_id, &attribute, &change.id)? {
                     winning_attributes.insert(attribute, value);
                 }
             }
@@ -127,7 +149,7 @@ impl SyncEngine {
         }
         
         // Get the current entity state from the database if it exists
-        let conn = txn.connection();
+        let conn = txn.txn;
         let check_sql = format!("SELECT * FROM {} WHERE id = ?", change.entity_type);
         
         let mut stmt = conn.prepare(&check_sql)?;
@@ -196,6 +218,27 @@ impl SyncEngine {
         
         Ok(())
     }
+    
+    /// Check if a change is the latest for a given attribute
+    fn is_latest_change_for_attribute(&self, txn: &crate::db::transaction::DbTransaction, 
+                                      entity_type: &str, entity_id: &str, 
+                                      attribute: &str, change_id: &str) -> Result<bool> {
+        let mut stmt = txn.txn.prepare(
+            "SELECT id FROM ZV_CHANGE 
+             WHERE entity_type = ? AND entity_id = ? 
+             AND (json_type(old_values, ?) IS NOT NULL OR json_type(new_values, ?) IS NOT NULL)
+             ORDER BY id DESC 
+             LIMIT 1"
+        )?;
+        
+        let json_path = format!("$.{}", attribute);
+        let latest_id: String = stmt.query_row(
+            params![entity_type, entity_id, &json_path, &json_path],
+            |row| row.get(0)
+        ).unwrap_or_else(|_| change_id.to_string());
+        
+        Ok(latest_id <= change_id.to_string())
+    }
 
     fn push(&self, db: &Db) -> Result<()> {
         let my_replica_id = db.get_database_uuid()?;
@@ -241,7 +284,7 @@ impl SyncEngine {
     
     fn get_unpushed_changes(&self, db: &Db, replica_id: &str, after_change_id: Option<&str>) -> Result<Vec<Change>> {
         db.transaction(|txn| {
-            let conn = txn.connection();
+            let conn = txn.txn;
             
             // Use "0" as minimum value when no after_change_id is provided
             // since UUIDv7s are lexicographically sortable and will all be > "0"
