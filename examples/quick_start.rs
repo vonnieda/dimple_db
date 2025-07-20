@@ -93,7 +93,8 @@ fn main() -> Result<()> {
     sync.sync(&db1)?;
     sync.sync(&db2)?;
 
-    assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 1);
+    // > Albums by Metallica: []
+    // > Albums by Metallica: [Album { id: "019825b0-14fc-7ef3-a7cc-ea97415fdcbd", title: "...And Justice For All" }]
 
     Ok(())
 }

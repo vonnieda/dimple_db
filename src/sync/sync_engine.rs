@@ -1,9 +1,8 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use rusqlite::{params, OptionalExtension};
 
-use crate::{db::Db, sync::{EncryptedStorage, LocalStorage, InMemoryStorage, S3Storage, SyncStorage}};
+use crate::{db::Db, sync::{Change, Changes, EncryptedStorage, InMemoryStorage, LocalStorage, ReplicaMetadata, S3Storage, SyncStorage}};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -260,7 +259,7 @@ impl SyncEngine {
         let _first_change_id = bundle.changes.first().map(|c| c.id.clone()).unwrap();
         let last_change_id = bundle.changes.last().map(|c| c.id.clone()).unwrap();
         
-        let data = serde_json::to_vec(&bundle)?;
+        let data = serde_json::to_vec_pretty(&bundle)?;
         let change_path = format!("changes/{}/{}.json", my_replica_id, change_file_id);
         self.storage.put(&change_path, &data)?;
         
@@ -269,7 +268,7 @@ impl SyncEngine {
             latest_change_id: last_change_id,
             latest_change_file: change_file_id,
         };
-        let replica_data = serde_json::to_vec(&replica_info)?;
+        let replica_data = serde_json::to_vec_pretty(&replica_info)?;
         self.storage.put(&format!("replicas/{}.json", my_replica_id), &replica_data)?;
         
         Ok(())
@@ -341,29 +340,6 @@ impl SyncEngine {
         let data = self.storage.get(&format!("replicas/{}.json", replica_id))?;
         Ok(serde_json::from_slice(&data)?)
     }
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct ReplicaMetadata {
-    pub replica_id: String,
-    pub latest_change_id: String,
-    pub latest_change_file: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct Changes {
-    pub replica_id: String,
-    pub changes: Vec<Change>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct Change {
-    pub id: String,
-    pub author_id: String,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub old_values: Option<String>,
-    pub new_values: Option<String>,
 }
 
 #[derive(Default)]
