@@ -1,3 +1,5 @@
+use std::sync::mpsc::channel;
+
 use anyhow::Result;
 use dimple_db::{sync::SyncEngine, Db};
 use rusqlite_migration::{Migrations, M};
@@ -24,6 +26,7 @@ pub struct AlbumArtist {
 }
 
 fn main() -> Result<()> {
+    let _ = env_logger::try_init();
     let migrations = Migrations::new(vec![
         M::up("
             CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);
@@ -31,22 +34,22 @@ fn main() -> Result<()> {
             CREATE TABLE Genre (id TEXT PRIMARY KEY, name TEXT NOT NULL);
             CREATE TABLE AlbumArtist (
                 id TEXT PRIMARY KEY, 
-                album_id TEXT, 
-                artist_id TEXT, 
+                album_id TEXT NOT NULL, 
+                artist_id TEXT NOT NULL, 
                 FOREIGN KEY (album_id) REFERENCES Album(id),
                 FOREIGN KEY (artist_id) REFERENCES Artist(id)
             );
             CREATE TABLE ArtistGenre (
                 id TEXT PRIMARY KEY, 
-                artist_id TEXT, 
-                genre_id TEXT, 
+                artist_id TEXT NOT NULL, 
+                genre_id TEXT NOT NULL, 
                 FOREIGN KEY (artist_id) REFERENCES Artist(id),
                 FOREIGN KEY (genre_id) REFERENCES Genre(id)
             );
             CREATE TABLE AlbumGenre (
                 id TEXT PRIMARY KEY, 
-                album_id TEXT, 
-                genre_id TEXT, 
+                album_id TEXT NOT NULL, 
+                genre_id TEXT NOT NULL, 
                 FOREIGN KEY (album_id) REFERENCES Album(id),
                 FOREIGN KEY (genre_id) REFERENCES Genre(id)
             );
@@ -77,24 +80,26 @@ fn main() -> Result<()> {
     let db2 = Db::open_memory()?;
     db2.migrate(&migrations)?;
     
-    // Set up a reactive query subscription
+    // Set up a reactive query subscription and a way to monitor it
     let sql = "SELECT Album.* FROM Album 
         JOIN AlbumArtist ON (AlbumArtist.album_id = Album.id)
         JOIN Artist ON (AlbumArtist.artist_id = Artist.id)
         WHERE Artist.name = ?";
-    let _sub = db2.query_subscribe(sql, ("Metallica",), |albums: Vec<Album>| {
+    let (sender, receiver) = channel::<String>();
+    let _sub = db2.query_subscribe(sql, ("Metallica",), move |albums: Vec<Album>| {
         println!("Albums by Metallica: {:?}", albums);
+        for album in albums {
+            sender.send(album.title).unwrap();
+        }
     })?;
 
     let sync = SyncEngine::builder()
         .in_memory()
-        // .encrypted("correct horse battery staple")
         .build()?;
     sync.sync(&db1)?;
     sync.sync(&db2)?;
 
-    // > Albums by Metallica: []
-    // > Albums by Metallica: [Album { id: "019825b0-14fc-7ef3-a7cc-ea97415fdcbd", title: "...And Justice For All" }]
+    assert_eq!(receiver.recv()?, "...And Justice For All");
 
     Ok(())
 }

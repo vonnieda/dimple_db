@@ -101,8 +101,18 @@ impl SyncEngine {
             // HashMap<(entity_type, entity_id), Vec<AttributeChange>>
             let entity_updates = self.group_changes_by_entity(newest_changes);
 
-            // Apply all entity updates
-            for ((entity_type, entity_id), changes) in entity_updates {
+            // Sort entity updates by the earliest change ID to maintain creation order
+            // This ensures parent entities are created before child entities with foreign keys
+            let mut sorted_updates: Vec<_> = entity_updates.into_iter().collect();
+            sorted_updates.sort_by(|a, b| {
+                // Find the earliest change ID for each entity
+                let min_a = a.1.iter().map(|c| &c.change_id).min();
+                let min_b = b.1.iter().map(|c| &c.change_id).min();
+                min_a.cmp(&min_b)
+            });
+
+            // Apply all entity updates in sorted order
+            for ((entity_type, entity_id), changes) in sorted_updates {
                 self.apply_entity_updates(txn, &entity_type, &entity_id, changes)?;
             }
 
