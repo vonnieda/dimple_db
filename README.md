@@ -15,9 +15,8 @@ local-first applications, and is inspired by
 
 # Status
 
-DimpleDb is currently being developed and is not yet ready for use. Please
-follow and star to be notified of new releases.
-
+DimpleDb is **BETA** and should not yet be used for production data. Please
+report any issues you run into.
 
 # Sync Engine
 
@@ -71,4 +70,5 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 - [Electric SQL](https://github.com/electric-sql/electric)
 - [LiveStore](https://livestore.dev/)	
 - [TinyBase](https://github.com/tinyplex/tinybase)	
-- https://www.dolthub.com/
+- [Dolthub](https://www.dolthub.com/)
+
