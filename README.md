@@ -12,6 +12,7 @@ DimpleDb is designed for storing and syncing user data across devices in
 local-first applications, and is inspired by 
 [Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
 
+
 # Status
 
 DimpleDb is currently being developed and is not yet ready for use. Please

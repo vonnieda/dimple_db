@@ -85,7 +85,7 @@ impl SyncEngine {
 
     fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangeRecord> {
         db.transaction(|txn| {
-            let mut stmt = txn.raw().prepare(
+            let mut stmt = txn.txn().prepare(
                 "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged
                  FROM ZV_CHANGE 
                  WHERE id = ?"
@@ -98,7 +98,8 @@ impl SyncEngine {
                     entity_type: row.get(2)?,
                     entity_id: row.get(3)?,
                     old_values: row.get(4)?,
-                    new_values: row.get(5)?
+                    new_values: row.get(5)?,
+                    merged: row.get(6)?,
                 })
             })?;
             
@@ -115,7 +116,7 @@ impl SyncEngine {
 
     fn put_local_change(&self, db: &Db, change: &ChangeRecord) -> Result<()> {
         db.transaction(|txn| {
-            txn.raw().execute(
+            txn.txn().execute(
                 "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values, merged) 
                  VALUES (?, ?, ?, ?, ?, ?, false)",
                 rusqlite::params![
@@ -125,6 +126,7 @@ impl SyncEngine {
                     &change.entity_id,
                     &change.old_values,
                     &change.new_values,
+                    &change.merged,
                 ]
             )?;
             Ok(())

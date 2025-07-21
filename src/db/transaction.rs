@@ -3,7 +3,7 @@ use rusqlite::{Params, Transaction, params};
 use uuid::Uuid;
 use std::cell::RefCell;
 
-use crate::db::{Db, Entity, types::DbEvent};
+use crate::db::{changelog, types::DbEvent, Db, Entity};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
@@ -19,8 +19,12 @@ impl<'a> DbTransaction<'a> {
             pending_events: RefCell::new(Vec::new()),
         }
     }
+
+    pub fn db(&self) -> &Db {
+        self.db
+    }
     
-    pub fn raw(&self) -> &rusqlite::Transaction {
+    pub fn txn(&self) -> &rusqlite::Transaction {
         self.txn
     }
 
@@ -97,7 +101,7 @@ impl<'a> DbTransaction<'a> {
         
         // Track changes
         if track_changes {
-            self.track_changes(&table_name, &id, old_value.as_ref(), 
+            changelog::track_changes(self, &table_name, &id, old_value.as_ref(), 
                 &new_value, &column_names)?;
         }
         
@@ -173,82 +177,6 @@ impl<'a> DbTransaction<'a> {
         Ok(())
     }
     
-    fn track_changes(&self, table_name: &str, entity_id: &str, 
-            old_entity: Option<&serde_json::Value>, 
-            new_entity: &serde_json::Value,
-            column_names: &[String]) -> Result<()> {
-        
-        let author_id = self.db.get_database_uuid()?;
-        
-        // Compute the diff between old and new entities
-        let (old_values, new_values) = self.compute_entity_diff(old_entity, new_entity, column_names);
-        
-        // Only create a change record if there are actual changes
-        if !old_values.is_empty() || !new_values.is_empty() {
-            let change_id = Uuid::now_v7().to_string();
-            
-            // Convert maps to JSON strings
-            let old_values_str = if old_values.is_empty() { 
-                None 
-            } else { 
-                Some(serde_json::to_string(&old_values)?) 
-            };
-            
-            let new_values_str = if new_values.is_empty() { 
-                None 
-            } else { 
-                Some(serde_json::to_string(&new_values)?) 
-            };
-            
-            self.txn.execute(
-                "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values) VALUES (?, ?, ?, ?, ?, ?)",
-                rusqlite::params![
-                    &change_id,
-                    &author_id,
-                    table_name,
-                    entity_id,
-                    old_values_str,
-                    new_values_str,
-                ]
-            )?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Compute the diff between old and new entities, returning only changed fields
-    fn compute_entity_diff(&self, old_entity: Option<&serde_json::Value>, 
-                          new_entity: &serde_json::Value,
-                          column_names: &[String]) -> (serde_json::Map<String, serde_json::Value>, 
-                                                       serde_json::Map<String, serde_json::Value>) {
-        let mut old_values = serde_json::Map::new();
-        let mut new_values = serde_json::Map::new();
-        
-        for column_name in column_names {
-            if column_name == "id" {
-                continue;
-            }
-            
-            let old_value = old_entity.and_then(|e| e.get(column_name));
-            let new_value = new_entity.get(column_name);
-            
-            // Track all values on insert, only changes on update
-            let is_insert = old_entity.is_none();
-            let values_differ = old_value != new_value;
-            
-            if is_insert || values_differ {
-                if let Some(old_val) = old_value {
-                    old_values.insert(column_name.clone(), old_val.clone());
-                }
-                if let Some(new_val) = new_value {
-                    new_values.insert(column_name.clone(), new_val.clone());
-                }
-            }
-        }
-        
-        (old_values, new_values)
-    }
-
     pub(crate) fn take_pending_events(&self) -> Vec<DbEvent> {
         std::mem::take(&mut *self.pending_events.borrow_mut())
     }
