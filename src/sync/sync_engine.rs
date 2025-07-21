@@ -34,7 +34,7 @@ impl SyncEngine {
             .collect::<Vec<_>>();
         for remote_change_id in missing_remote_change_ids {
             let change = self.get_remote_change(remote_change_id)?;
-            self.put_local_change(&change)?;
+            self.put_local_change(db, &change)?;
         }
 
         // and for any changes on the local, but not the remote, upload them
@@ -42,12 +42,16 @@ impl SyncEngine {
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
         for local_change_id in missing_local_change_ids {
-            let change = self.get_local_change(local_change_id)?;
+            let change = self.get_local_change(db, local_change_id)?;
             self.put_remote_change(&change)?;
         }
 
         // TODO read the set of unmerged (entity_type, entity_id) and rebuild
-        // them. This can also all be done in parallel.
+        // them.
+        // This all needs to happen in a single transaction, I think.
+        // So something like select * from zv_change where merged = false
+        // to get the unmerged changes, and then we either merge them
+        // directly or perform rebuild ops on the referenced entities.
 
         Ok(())
     }
@@ -59,23 +63,76 @@ impl SyncEngine {
     }
 
     fn list_remote_change_ids(&self) -> Result<Vec<String>> {
-        todo!()
+        let prefix = "changes/";
+        let files = self.storage.list(prefix)?;
+        
+        let mut change_ids = Vec::new();
+        for file in files {
+            if let Some(path) = file.strip_prefix(prefix) {
+                if let Some(change_id) = path.strip_suffix(".json") {
+                    change_ids.push(change_id.to_string());
+                }
+            }
+        }
+        
+        change_ids.sort();
+        Ok(change_ids)
     }
 
-    fn get_local_change(&self, change_id: &str) -> Result<Change> {
-        todo!()
+    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<Change> {
+        db.transaction(|txn| {
+            let mut stmt = txn.txn.prepare(
+                "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged
+                 FROM ZV_CHANGE 
+                 WHERE id = ?"
+            )?;
+            
+            let change = stmt.query_row(rusqlite::params![change_id], |row| {
+                Ok(Change {
+                    id: row.get(0)?,
+                    author_id: row.get(1)?,
+                    entity_type: row.get(2)?,
+                    entity_id: row.get(3)?,
+                    old_values: row.get(4)?,
+                    new_values: row.get(5)?,
+                    merged: row.get(6)?,
+                })
+            })?;
+            
+            Ok(change)
+        })
     }
 
     fn get_remote_change(&self, change_id: &str) -> Result<Change> {
-        todo!()
+        let path = format!("changes/{}.json", change_id);
+        let data = self.storage.get(&path)?;
+        let change: Change = serde_json::from_slice(&data)?;
+        Ok(change)
     }
 
-    fn put_local_change(&self, change: &Change) -> Result<()> {
-        todo!()
+    fn put_local_change(&self, db: &Db, change: &Change) -> Result<()> {
+        db.transaction(|txn| {
+            txn.txn.execute(
+                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values, merged) 
+                 VALUES (?, ?, ?, ?, ?, ?, false)",
+                rusqlite::params![
+                    &change.id,
+                    &change.author_id,
+                    &change.entity_type,
+                    &change.entity_id,
+                    &change.old_values,
+                    &change.new_values,
+                ]
+            )?;
+            Ok(())
+        })
     }
 
     fn put_remote_change(&self, change: &Change) -> Result<()> {
-        todo!()
+        let path = format!("changes/{}.json", change.id);
+        let data = serde_json::to_vec_pretty(change)?;
+        self.storage.put(&path, &data)?;
+        Ok(())
     }
 }
 
