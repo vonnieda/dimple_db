@@ -1,5 +1,4 @@
 use anyhow::Result;
-use uuid::Uuid;
 use rusqlite::{params, OptionalExtension};
 
 use crate::{db::Db, sync::{Change, Changes, EncryptedStorage, InMemoryStorage, LocalStorage, ReplicaMetadata, S3Storage, SyncStorage}};
@@ -20,7 +19,6 @@ impl SyncEngine {
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
-        // TODO: Handle large change sets more efficiently (pagination, streaming)
         self.pull(db)?;
         self.push(db)?;
         Ok(())
@@ -35,7 +33,7 @@ impl SyncEngine {
             if replica.replica_id == my_replica_id {
                 continue;
             }
-            
+
             self.pull_replica_changes(db, &replica)?;
         }
         Ok(())
@@ -47,8 +45,13 @@ impl SyncEngine {
         let change_files = self.list_change_files(&replica.replica_id)?;
         
         for change_file in change_files {
+            // Extract the first change ID from the filename (format: "firstId_lastId")
+            let first_change_id = change_file.split('_').next()
+                .ok_or_else(|| anyhow::anyhow!("Invalid change file name: {}", change_file))?;
+            
+            // Skip if we've already processed this file's changes
             if let Some(ref latest_id) = latest_change_id {
-                if change_file <= *latest_id {
+                if first_change_id <= latest_id.as_str() {
                     continue;
                 }
             }
@@ -87,6 +90,7 @@ impl SyncEngine {
                     .map(|s| s.to_string())
             })
             .collect();
+        // Files are named as "firstId_lastId", so lexicographic sort gives us chronological order
         change_files.sort();
         Ok(change_files)
     }
@@ -250,23 +254,25 @@ impl SyncEngine {
             return Ok(());
         }
         
-        let change_file_id = Uuid::now_v7().to_string();
         let bundle = Changes {
             replica_id: my_replica_id.clone(),
             changes: unpushed_changes,
         };
         
-        let _first_change_id = bundle.changes.first().map(|c| c.id.clone()).unwrap();
+        let first_change_id = bundle.changes.first().map(|c| c.id.clone()).unwrap();
         let last_change_id = bundle.changes.last().map(|c| c.id.clone()).unwrap();
         
+        // Name file with change ID range for proper ordering
+        let change_file_name = format!("{}_{}", first_change_id, last_change_id);
+        
         let data = serde_json::to_vec_pretty(&bundle)?;
-        let change_path = format!("changes/{}/{}.json", my_replica_id, change_file_id);
+        let change_path = format!("changes/{}/{}.json", my_replica_id, change_file_name);
         self.storage.put(&change_path, &data)?;
         
         let replica_info = ReplicaMetadata {
             replica_id: my_replica_id.clone(),
             latest_change_id: last_change_id,
-            latest_change_file: change_file_id,
+            latest_change_file: change_file_name,
         };
         let replica_data = serde_json::to_vec_pretty(&replica_info)?;
         self.storage.put(&format!("replicas/{}.json", my_replica_id), &replica_data)?;
@@ -432,6 +438,48 @@ mod tests {
         
         assert_eq!(db1.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 5);
         assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn delayed_sync() -> anyhow::Result<()> {
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (name TEXT NOT NULL, country TEXT, id TEXT NOT NULL PRIMARY KEY);"),
+        ]);
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+        db1.save(&Artist {
+            name: "Metallica".to_string(),
+            ..Default::default()
+        })?;
+        sync_engine.sync(&db1)?;
+
+        db1.save(&Artist {
+            name: "Megadeth".to_string(),
+            ..Default::default()
+        })?;
+        sync_engine.sync(&db1)?;
+
+        db2.save(&Artist {
+            name: "Anthrax".to_string(),
+            ..Default::default()
+        })?;
+        db2.save(&Artist {
+            name: "Slayer".to_string(),
+            ..Default::default()
+        })?;
+        sync_engine.sync(&db1)?;
+        
+        sync_engine.sync(&db2)?;
+        
+        assert_eq!(db1.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 4);
+        assert_eq!(db2.query::<Artist, _>("SELECT * FROM Artist", ())?.len(), 4);
         Ok(())
     }
 

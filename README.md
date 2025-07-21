@@ -51,12 +51,13 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 
 ## Distributed Systems
 - [Ordering Distributed Events](https://medium.com/baseds/ordering-distributed-events-29c1dd9d1eff)
-- [Iroh gives you an API for dialing by public key](https://github.com/n0-computer/iroh)
-- [UUIDv7: Timestamp ordered UUIDs](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format)
-- [Riffle Systems](https://riffle.systems/)
-- [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
 - [Hybrid Logical Clocks](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html)
 - [Logical Physical Clocks](https://cse.buffalo.edu/tech-reports/2014-04.pdf)
+- [UUIDv7: Timestamp ordered UUIDs](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format)
+- [Merklizing the key/value store for fun and profit](https://joelgustafson.com/posts/2023-05-04/merklizing-the-key-value-store-for-fun-and-profit)
+- [Iroh gives you an API for dialing by public key](https://github.com/n0-computer/iroh)
+- [Riffle Systems](https://riffle.systems/)
+- [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
 
 ## Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)
@@ -69,4 +70,4 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 - [Electric SQL](https://github.com/electric-sql/electric)
 - [LiveStore](https://livestore.dev/)	
 - [TinyBase](https://github.com/tinyplex/tinybase)	
-
+- https://www.dolthub.com/

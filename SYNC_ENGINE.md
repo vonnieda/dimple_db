@@ -8,8 +8,9 @@
 
 ## Conflict Resolution
 
-Conflicts are resolved using **Last-Write-Wins (LWW) per attribute** based on
-the UUIDv7 change ID. 
+The Sync Engine treats the database tables as grow only lists and the columns
+as last-write-wins registers, giving it the attributes of a CRDT. Deletes can
+be handled at the user level with tombstones.
 
 # Sync Storage
 
@@ -82,3 +83,8 @@ TODO document
 ## Sync Algorithm
 
 TODO document
+
+
+
+
+

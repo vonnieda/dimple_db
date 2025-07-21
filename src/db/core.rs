@@ -166,7 +166,8 @@ impl Db {
                 entity_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 old_values TEXT,
-                new_values TEXT
+                new_values TEXT,
+                merged BOOL NOT NULL DEFAULT false
             );
         ")?;
         Ok(())
