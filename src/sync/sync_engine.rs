@@ -1,8 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::{db::{ChangeRecord, Db}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+use crate::{db::{ChangeRecord, Db, transaction::DbTransaction}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+
+#[derive(Debug)]
+struct AttributeChange {
+    change_id: String,
+    entity_type: String,
+    entity_id: String,
+    attribute: String,
+    new_value: serde_json::Value,
+}
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -19,27 +28,43 @@ impl SyncEngine {
         SyncEngineBuilder::default()
     }
 
+    /// # Sync Algorithm
+    /// 
+    /// The goal is for every device/replica/author to have a complete copy of
+    /// the changelog. From the changelog we can replicate the entity state
+    /// at any point in time from the perspective of any author.
+    /// 
+    /// 1. Get the sets of local and remote change_ids.
+    /// 2. For any remote change_id not in the local set, download and insert
+    /// it, setting merged = false. 
+    /// 3. For any local change_id not in the remote set, upload it.
+    /// 4. Get the local changes that are marked unmerged.
+    /// 5. Map these, parsing the JSON, to &[(change_id, entity_name, entity_id, attribute, new_value)]
+    /// 6. Reduce this to only the newest change for each (entity_name, entity_id, attribute)
+    /// 7. Group these by (entity_name, entity_id)
+    /// 8. For each group:
+    ///     1. Read the entity
+    ///     2. Update the entity fields from the values in the group
+    ///     3. Save the entity
     pub fn sync(&self, db: &Db) -> Result<()> {
-        // TODO I think almost everything in this function can be done in parallel
-
-        // gets lists of local and remote change_ids into HashSets for quick
-        // lookups
+        // 1. Get the sets of local and remote change_ids.
         let local_change_ids = self.list_local_change_ids(db)?
             .into_iter().collect::<HashSet<_>>();
         let remote_change_ids = self.list_remote_change_ids()?
             .into_iter().collect::<HashSet<_>>();
 
-        // for any changes on the remote, but not local, download and save them
-        // any newly inserted changes should be marked unmerged
+        // 2. For any remote change_id not in the local set, download and insert
+        // it, setting merged = false. 
         let missing_remote_change_ids = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
         for remote_change_id in missing_remote_change_ids {
-            let change = self.get_remote_change(remote_change_id)?;
+            let mut change = self.get_remote_change(remote_change_id)?;
+            change.merged = false;
             self.put_local_change(db, &change)?;
         }
 
-        // and for any changes on the local, but not the remote, upload them
+        // 3. For any local change_id not in the remote set, upload it.
         let missing_local_change_ids = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
@@ -48,14 +73,176 @@ impl SyncEngine {
             self.put_remote_change(&change)?;
         }
 
-        // TODO read the set of unmerged (entity_type, entity_id) and rebuild
-        // them.
-        // This all needs to happen in a single transaction, I think.
-        // So something like select * from zv_change where merged = false
-        // to get the unmerged changes, and then we either merge them
-        // directly or perform rebuild ops on the referenced entities.
+        // 4-8. Process unmerged changes
+        self.merge_unmerged_changes(db)
+    }
 
+    fn merge_unmerged_changes(&self, db: &Db) -> Result<()> {
+        db.transaction(|txn| {
+            // Get unmerged changes
+            // Vec<ChangeRecord>
+            let unmerged_changes = txn.query::<ChangeRecord, _>(
+                "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged 
+                 FROM ZV_CHANGE 
+                 WHERE merged = false 
+                 ORDER BY id",
+                ()
+            )?;
+
+            // Extract individual attribute changes
+            // Vec<AttributeChange>
+            let attribute_changes = self.extract_attribute_changes(&unmerged_changes)?;
+
+            // Reduce to newest changes per attribute
+            // HashMap<(entity_type, entity_id, attribute), AttributeChange>
+            let newest_changes = self.reduce_to_newest_changes(attribute_changes);
+
+            // Group by entity and apply updates
+            // HashMap<(entity_type, entity_id), Vec<AttributeChange>>
+            let entity_updates = self.group_changes_by_entity(newest_changes);
+
+            // Apply all entity updates
+            for ((entity_type, entity_id), changes) in entity_updates {
+                self.apply_entity_updates(txn, &entity_type, &entity_id, changes)?;
+            }
+
+            // Mark all changes as merged
+            txn.txn().execute(
+                "UPDATE ZV_CHANGE SET merged = true WHERE merged = false",
+                []
+            )?;
+
+            Ok(())
+        })
+    }
+
+    fn extract_attribute_changes(&self, unmerged_changes: &[ChangeRecord]) -> Result<Vec<AttributeChange>> {
+        let mut attribute_changes = Vec::new();
+
+        for change in unmerged_changes {
+            if let Some(new_values_json) = &change.new_values {
+                if let Ok(new_values) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(new_values_json) {
+                    for (attribute, value) in new_values {
+                        attribute_changes.push(AttributeChange {
+                            change_id: change.id.clone(),
+                            entity_type: change.entity_type.clone(),
+                            entity_id: change.entity_id.clone(),
+                            attribute,
+                            new_value: value,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(attribute_changes)
+    }
+
+    fn reduce_to_newest_changes(&self, attribute_changes: Vec<AttributeChange>) -> HashMap<(String, String, String), AttributeChange> {
+        let mut newest_changes: HashMap<(String, String, String), AttributeChange> = HashMap::new();
+
+        for change in attribute_changes {
+            let key = (
+                change.entity_type.clone(), 
+                change.entity_id.clone(), 
+                change.attribute.clone()
+            );
+
+            match newest_changes.get(&key) {
+                Some(existing) if existing.change_id >= change.change_id => {
+                    // Keep existing (it's newer)
+                }
+                _ => {
+                    // Insert new or replace with newer
+                    newest_changes.insert(key, change);
+                }
+            }
+        }
+
+        newest_changes
+    }
+
+    fn group_changes_by_entity(&self, newest_changes: HashMap<(String, String, String), AttributeChange>) -> HashMap<(String, String), Vec<AttributeChange>> {
+        let mut entity_updates = HashMap::new();
+
+        for (_, change) in newest_changes {
+            let key = (change.entity_type.clone(), change.entity_id.clone());
+            entity_updates.entry(key).or_insert_with(Vec::new).push(change);
+        }
+
+        entity_updates
+    }
+
+    fn apply_entity_updates(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, changes: Vec<AttributeChange>) -> Result<()> {
+        // Start with entity ID
+        let mut entity_json = serde_json::Map::new();
+        entity_json.insert("id".to_string(), serde_json::Value::String(entity_id.to_string()));
+
+        // Read existing entity if it exists
+        if self.entity_exists(txn, entity_type, entity_id)? {
+            self.read_existing_entity(txn, entity_type, entity_id, &mut entity_json)?;
+        }
+
+        // Apply all attribute changes
+        for change in changes {
+            entity_json.insert(change.attribute, change.new_value);
+        }
+
+        // Save the updated entity
+        txn.save_dynamic(entity_type, &entity_json)?;
+
+        Ok(())
+    }
+
+    fn entity_exists(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str) -> Result<bool> {
+        Ok(txn.txn().query_row(
+            &format!("SELECT 1 FROM {} WHERE id = ?", entity_type),
+            rusqlite::params![entity_id],
+            |_| Ok(())
+        ).is_ok())
+    }
+
+    fn read_existing_entity(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, entity_json: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
+        let query = format!("SELECT * FROM {} WHERE id = ?", entity_type);
+        let mut stmt = txn.txn().prepare(&query)?;
         
+        let column_names: Vec<String> = stmt.column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // TODO smells
+        stmt.query_row(rusqlite::params![entity_id], |row| {
+            for (idx, column_name) in column_names.iter().enumerate() {
+                if column_name != "id" {
+                    // Try to get value as different types
+                    if let Ok(val) = row.get::<_, Option<String>>(idx) {
+                        entity_json.insert(
+                            column_name.clone(),
+                            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
+                        );
+                    } else if let Ok(val) = row.get::<_, Option<i64>>(idx) {
+                        entity_json.insert(
+                            column_name.clone(),
+                            val.map(|v| serde_json::Value::Number(v.into())).unwrap_or(serde_json::Value::Null)
+                        );
+                    } else if let Ok(val) = row.get::<_, Option<f64>>(idx) {
+                        entity_json.insert(
+                            column_name.clone(),
+                            val.and_then(|v| serde_json::Number::from_f64(v))
+                                .map(serde_json::Value::Number)
+                                .unwrap_or(serde_json::Value::Null)
+                        );
+                    } else if let Ok(val) = row.get::<_, Option<bool>>(idx) {
+                        entity_json.insert(
+                            column_name.clone(),
+                            val.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null)
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -126,7 +313,6 @@ impl SyncEngine {
                     &change.entity_id,
                     &change.old_values,
                     &change.new_values,
-                    &change.merged,
                 ]
             )?;
             Ok(())

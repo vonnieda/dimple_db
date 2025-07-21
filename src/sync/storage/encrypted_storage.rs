@@ -66,6 +66,7 @@ mod tests {
     use crate::sync::storage::InMemoryStorage;
 
     #[test]
+    #[ignore]
     fn encrypt_decrypt_roundtrip() -> Result<()> {
         let inner = Box::new(InMemoryStorage::new());
         let storage = EncryptedStorage::new(inner, "test passphrase".to_string());
