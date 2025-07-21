@@ -23,7 +23,7 @@ pub (crate) fn init_change_tracking_tables(conn: &Connection) -> Result<()> {
             author_id TEXT NOT NULL,
             entity_type TEXT NOT NULL,
             entity_id TEXT NOT NULL,
-            columns_json TEXT,
+            columns_json TEXT NOT NULL,
             merged BOOL NOT NULL DEFAULT FALSE
         );
     ")?;

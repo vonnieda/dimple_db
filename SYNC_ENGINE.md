@@ -1,10 +1,14 @@
 # Sync Engine
 
-1. All changes to entities are tracked in the **change log**, which is in [ZV_CHANGE and associated tables](#sync-schema). 
+1. All changes to entities are tracked in the **change log**, which is in 
+[ZV_CHANGE and associated tables](#sync-schema). 
 2. Each **replica** keeps a complete merged copy of the change log.
-3. Each change includes a [UUIDv7](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format) which acts as a [hybrid logical clock](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html), providing a global order across all replicas.
-4. During a sync, a replica **pulls** new changes from other replicas and **pushes** new local changes made since the last sync.
-5. The database tables associated with each entity are kept in sync with the change log as changes from other replicas are merged.
+3. Each change includes a [UUIDv7](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format)
+which acts as a [hybrid logical clock](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html),
+providing a global order across all replicas.
+4. During a sync, a replica pushes any changes from the local changelog that
+are not on the remote, and pulls any that are on the remote and not local.
+5. After a sync, any new local changelogs are merged into the entity tables.
 
 ## Conflict Resolution
 
@@ -14,11 +18,10 @@ be handled at the user level with tombstones.
 
 # Sync Storage
 
-Each replica stores a metadata file and one or more change files in the storage.
+Each replica stores one or more change files in the storage.
 
-The metadata includes information about the last file and changes uploaded so that other replicas can quickly determine if there are new changes to sync.
-
-The change files contain an array of one or more change records. The filename is a new UUIDv7 generated when the file is created.
+Each change file contains one record from the ZV_CHANGE table, representing
+one or more column updates to an entity.
 
 ## Directory Structure
 
@@ -26,20 +29,10 @@ The change files contain an array of one or more change records. The filename is
 s3://endpoint/bucket/base_path/ or
 file://base_path or
 memory://base_path
-├── replicas/
-│   └── {replica_uuid}.json
 └── changes/
-    └── {replica_uuid}/
-        └── {change_uuid}.json
+	└── {change_uuid}.json
 ```
 
-## Useful Prefixes
-
-```
-replicas = list("replicas/")
-replica_changes = list("changes/{replica_uuid}/")
-all_changes = list("changes/")
-```
 
 # Sync Schema
 
@@ -59,31 +52,25 @@ CREATE TABLE IF NOT EXISTS ZV_CHANGE (
 	author_id TEXT NOT NULL,
 	entity_type TEXT NOT NULL,
 	entity_id TEXT NOT NULL,
-	old_values TEXT,
-	new_values TEXT
+	columns_json TEXT NOT NULL
 );
 ```
 
 ## Data Structures
 
-### Replica Metadata
-
-Stored in `replicas/{replica_uuid}.json`:
-```json
-TODO document
-```
-
 ### Change File Format
 
-Stored in `changes/{replica_uuid}/{change_file_uuid}.json`:
+Stored in `changes/{change_file_uuid}.json`:
 ```json
-TODO document
+{
+  "id": "01982f1e-dedc-7863-941c-fa5584b872c1",
+  "author_id": "01982f1e-dedb-75a2-98d9-088958068486",
+  "entity_type": "AlbumArtist",
+  "entity_id": "01982f1e-dedc-7863-941c-fa4d1d95389c",
+  "columns_json": "{\"album_id\":\"01982f1e-dedc-7863-941c-fa255d8d889d\",\"artist_id\":\"01982f1e-dedc-7863-941c-fa034bd17890\"}",
+  "merged": false
+}
 ```
-
-## Sync Algorithm
-
-TODO document
-
 
 # TODO
 
