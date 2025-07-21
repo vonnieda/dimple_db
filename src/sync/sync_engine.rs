@@ -546,4 +546,73 @@ mod tests {
         
         Ok(())
     }
+
+    #[test]
+    fn foreign_key_ordering() -> anyhow::Result<()> {
+        #[derive(Serialize, Deserialize, Debug, Default)]
+        struct Artist {
+            id: String,
+            name: String,
+        }
+        
+        #[derive(Serialize, Deserialize, Debug, Default)]
+        struct Album {
+            id: String,
+            title: String,
+            artist_id: String,
+        }
+        
+        // Test that entities with foreign keys are synced after their dependencies
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+            M::up("CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT NOT NULL, artist_id TEXT NOT NULL, 
+                   FOREIGN KEY (artist_id) REFERENCES Artist(id));"),
+        ]);
+        
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        // Create an artist and album in db1
+        let artist = db1.save(&Artist {
+            name: "The Beatles".to_string(),
+            ..Default::default()
+        })?;
+        
+        let album = db1.save(&Album {
+            title: "Abbey Road".to_string(),
+            artist_id: artist.id.clone(),
+            ..Default::default()
+        })?;
+        
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+            
+        // Sync to storage
+        sync_engine.sync(&db1)?;
+        
+        // Sync from storage to db2 - this should not fail with foreign key constraint
+        // even though the HashMap iteration order might try to insert Album before Artist
+        sync_engine.sync(&db2)?;
+        
+        // Verify both entities exist in db2
+        let artists: Vec<Artist> = db2.query(
+            "SELECT * FROM Artist WHERE id = ?", 
+            [&artist.id]
+        )?;
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "The Beatles");
+        
+        let albums: Vec<Album> = db2.query(
+            "SELECT * FROM Album WHERE id = ?", 
+            [&album.id]
+        )?;
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].title, "Abbey Road");
+        assert_eq!(albums[0].artist_id, artist.id);
+        
+        Ok(())
+    }
 }
