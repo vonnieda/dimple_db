@@ -1,9 +1,9 @@
-use std::sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex};
+use std::{collections::HashSet, sync::{mpsc::{self, Receiver, Sender}, Arc, Mutex}};
 
 use anyhow::Result;
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{functions::FunctionFlags, Connection, Params, Transaction};
+use rusqlite::{functions::FunctionFlags, Connection, OptionalExtension, Params, Transaction};
 use rusqlite_migration::{Migrations};
 use uuid::Uuid;
 
@@ -166,8 +166,7 @@ impl Db {
                 entity_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 old_values TEXT,
-                new_values TEXT,
-                merged BOOL NOT NULL DEFAULT false
+                new_values TEXT
             );
         ")?;
         Ok(())
@@ -200,6 +199,98 @@ impl Db {
                 tx.send(event.clone()).is_ok()
             });
         }
+    }
+
+    /// Reads the current state of the entity from the accumulated changelog.
+    /// TODO not finished/tested yet
+    fn get_entity_state(&self, db: &Db, entity_name: &str, entity_id: &str) -> Result<serde_json::Value> {
+        db.transaction(|txn| {
+            // Get table column info from database
+            let mut stmt = txn.raw().prepare(&format!(
+                "SELECT name FROM pragma_table_info('{}') WHERE name != 'id'",
+                entity_name
+            ))?;
+            
+            let columns: Vec<String> = stmt.query_map([], |row| {
+                row.get::<_, String>(0)
+            })?.collect::<Result<Vec<_>, _>>()?;
+            
+            // Start with the id field
+            let mut entity_state = serde_json::Map::new();
+            entity_state.insert("id".to_string(), serde_json::Value::String(entity_id.to_string()));
+            
+            // Track which attributes have been set
+            let mut attributes_needed: HashSet<String> = columns.into_iter().collect();
+            
+            // Read all changes for this entity, ordered newest to oldest
+            let mut stmt = txn.raw().prepare(
+                "SELECT new_values, old_values
+                 FROM ZV_CHANGE 
+                 WHERE entity_type = ? AND entity_id = ?
+                 ORDER BY id DESC"
+            )?;
+            
+            let changes = stmt.query_map(
+                rusqlite::params![entity_name, entity_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?
+                    ))
+                }
+            )?;
+            
+            // Process changes newest to oldest
+            for change_result in changes {
+                let (new_values_json, old_values_json) = change_result?;
+                
+                // Process new_values first (they take precedence)
+                if let Some(new_json) = new_values_json {
+                    if let Ok(new_values) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&new_json) {
+                        for (key, value) in new_values {
+                            // Only set if we haven't already set this attribute
+                            if attributes_needed.remove(&key) {
+                                entity_state.insert(key, value);
+                            }
+                        }
+                    }
+                }
+                
+                // Check if all attributes have been found
+                if attributes_needed.is_empty() {
+                    break;
+                }
+            }
+            
+            // For any remaining attributes not found in changes, check old_values from the oldest change
+            // This handles the initial insert case
+            if !attributes_needed.is_empty() {
+                let mut stmt = txn.raw().prepare(
+                    "SELECT old_values
+                     FROM ZV_CHANGE 
+                     WHERE entity_type = ? AND entity_id = ?
+                     ORDER BY id ASC
+                     LIMIT 1"
+                )?;
+                
+                if let Ok(Some(old_values_json)) = stmt.query_row(
+                    rusqlite::params![entity_name, entity_id],
+                    |row| row.get::<_, Option<String>>(0)
+                ).optional() {
+                    if let Some(old_json) = old_values_json {
+                        if let Ok(old_values) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&old_json) {
+                            for (key, value) in old_values {
+                                if attributes_needed.contains(&key) && !entity_state.contains_key(&key) {
+                                    entity_state.insert(key, value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Ok(serde_json::Value::Object(entity_state))
+        })
     }
 }
 
@@ -680,6 +771,25 @@ mod tests {
         std::fs::remove_file(&db_path).ok();
         
         Ok(())
+    }
+
+    #[test]
+    fn get_entity_state() -> anyhow::Result<()> {
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (name TEXT NOT NULL, country TEXT, id TEXT NOT NULL PRIMARY KEY);"),
+        ]);
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        let artist = db1.save(&Artist {
+            name: "Metallica".to_string(),
+            ..Default::default()
+        })?;
+
+        // let artist_json = 
+        todo!()
     }
     
     #[derive(Serialize, Deserialize, Default, Debug)]

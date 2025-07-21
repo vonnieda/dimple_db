@@ -7,7 +7,7 @@ use crate::db::{Db, Entity, types::DbEvent};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
-    pub txn: &'a Transaction<'a>,
+    txn: &'a Transaction<'a>,
     pending_events: RefCell<Vec<DbEvent>>,
 }
 
@@ -20,7 +20,7 @@ impl<'a> DbTransaction<'a> {
         }
     }
     
-    pub fn connection(&self) -> &rusqlite::Connection {
+    pub fn raw(&self) -> &rusqlite::Transaction {
         self.txn
     }
 

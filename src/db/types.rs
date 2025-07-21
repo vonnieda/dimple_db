@@ -23,5 +23,5 @@ pub struct ChangeRecord {
 pub enum DbEvent {
     Insert(String, String),
     Update(String, String),
-    Delete(String, String),
+    Delete(String, String), // Currently unimplemented, may come with tombstones.
 }

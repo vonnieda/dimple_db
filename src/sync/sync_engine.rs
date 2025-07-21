@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::{db::Db, sync::{Change, EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+use crate::{db::{ChangeRecord, Db}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -20,6 +20,8 @@ impl SyncEngine {
     }
 
     pub fn sync(&self, db: &Db) -> Result<()> {
+        // TODO I think almost everything in this function can be done in parallel
+
         // gets lists of local and remote change_ids into HashSets for quick
         // lookups
         let local_change_ids = self.list_local_change_ids(db)?
@@ -53,11 +55,13 @@ impl SyncEngine {
         // to get the unmerged changes, and then we either merge them
         // directly or perform rebuild ops on the referenced entities.
 
+        
+
         Ok(())
     }
 
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
-        Ok(db.query::<Change, _>("SELECT * FROM ZV_CHANGE ORDER BY id ASC", ())?
+        Ok(db.query::<ChangeRecord, _>("SELECT * FROM ZV_CHANGE ORDER BY id ASC", ())?
             .iter().map(|change| change.id.clone())
             .collect())
     }
@@ -79,23 +83,22 @@ impl SyncEngine {
         Ok(change_ids)
     }
 
-    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<Change> {
+    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangeRecord> {
         db.transaction(|txn| {
-            let mut stmt = txn.txn.prepare(
+            let mut stmt = txn.raw().prepare(
                 "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged
                  FROM ZV_CHANGE 
                  WHERE id = ?"
             )?;
             
             let change = stmt.query_row(rusqlite::params![change_id], |row| {
-                Ok(Change {
+                Ok(ChangeRecord {
                     id: row.get(0)?,
                     author_id: row.get(1)?,
                     entity_type: row.get(2)?,
                     entity_id: row.get(3)?,
                     old_values: row.get(4)?,
-                    new_values: row.get(5)?,
-                    merged: row.get(6)?,
+                    new_values: row.get(5)?
                 })
             })?;
             
@@ -103,16 +106,16 @@ impl SyncEngine {
         })
     }
 
-    fn get_remote_change(&self, change_id: &str) -> Result<Change> {
+    fn get_remote_change(&self, change_id: &str) -> Result<ChangeRecord> {
         let path = format!("changes/{}.json", change_id);
         let data = self.storage.get(&path)?;
-        let change: Change = serde_json::from_slice(&data)?;
+        let change: ChangeRecord = serde_json::from_slice(&data)?;
         Ok(change)
     }
 
-    fn put_local_change(&self, db: &Db, change: &Change) -> Result<()> {
+    fn put_local_change(&self, db: &Db, change: &ChangeRecord) -> Result<()> {
         db.transaction(|txn| {
-            txn.txn.execute(
+            txn.raw().execute(
                 "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values, merged) 
                  VALUES (?, ?, ?, ?, ?, ?, false)",
                 rusqlite::params![
@@ -128,7 +131,7 @@ impl SyncEngine {
         })
     }
 
-    fn put_remote_change(&self, change: &Change) -> Result<()> {
+    fn put_remote_change(&self, change: &ChangeRecord) -> Result<()> {
         let path = format!("changes/{}.json", change.id);
         let data = serde_json::to_vec_pretty(change)?;
         self.storage.put(&path, &data)?;
