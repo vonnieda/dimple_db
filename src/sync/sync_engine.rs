@@ -82,7 +82,7 @@ impl SyncEngine {
             // Get unmerged changes
             // Vec<ChangeRecord>
             let unmerged_changes = txn.query::<ChangeRecord, _>(
-                "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged 
+                "SELECT id, author_id, entity_type, entity_id, columns_json, merged 
                  FROM ZV_CHANGE 
                  WHERE merged = false 
                  ORDER BY id",
@@ -120,9 +120,9 @@ impl SyncEngine {
         let mut attribute_changes = Vec::new();
 
         for change in unmerged_changes {
-            if let Some(new_values_json) = &change.new_values {
-                if let Ok(new_values) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(new_values_json) {
-                    for (attribute, value) in new_values {
+            if let Some(columns_json) = &change.columns_json {
+                if let Ok(columns) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(columns_json) {
+                    for (attribute, value) in columns {
                         attribute_changes.push(AttributeChange {
                             change_id: change.id.clone(),
                             entity_type: change.entity_type.clone(),
@@ -248,7 +248,7 @@ impl SyncEngine {
     }
 
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
-        Ok(db.query::<ChangeRecord, _>("SELECT * FROM ZV_CHANGE ORDER BY id ASC", ())?
+        Ok(db.query::<ChangeRecord, _>("SELECT id, author_id, entity_type, entity_id, columns_json, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
             .iter().map(|change| change.id.clone())
             .collect())
     }
@@ -273,7 +273,7 @@ impl SyncEngine {
     fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangeRecord> {
         db.transaction(|txn| {
             let mut stmt = txn.txn().prepare(
-                "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged
+                "SELECT id, author_id, entity_type, entity_id, columns_json, merged
                  FROM ZV_CHANGE 
                  WHERE id = ?"
             )?;
@@ -284,9 +284,8 @@ impl SyncEngine {
                     author_id: row.get(1)?,
                     entity_type: row.get(2)?,
                     entity_id: row.get(3)?,
-                    old_values: row.get(4)?,
-                    new_values: row.get(5)?,
-                    merged: row.get(6)?,
+                    columns_json: row.get(4)?,
+                    merged: row.get(5)?,
                 })
             })?;
             
@@ -304,15 +303,14 @@ impl SyncEngine {
     fn put_local_change(&self, db: &Db, change: &ChangeRecord) -> Result<()> {
         db.transaction(|txn| {
             txn.txn().execute(
-                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, old_values, new_values, merged) 
-                 VALUES (?, ?, ?, ?, ?, ?, false)",
+                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, columns_json, merged) 
+                 VALUES (?, ?, ?, ?, ?, false)",
                 rusqlite::params![
                     &change.id,
                     &change.author_id,
                     &change.entity_type,
                     &change.entity_id,
-                    &change.old_values,
-                    &change.new_values,
+                    &change.columns_json,
                 ]
             )?;
             Ok(())

@@ -215,7 +215,7 @@ mod tests {
 
     fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangeRecord>> {
         db.query(
-            "SELECT id, author_id, entity_type, entity_id, old_values, new_values, merged 
+            "SELECT id, author_id, entity_type, entity_id, columns_json, merged 
              FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",
             [entity_id]
         )
@@ -273,12 +273,12 @@ mod tests {
         
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1); // One change record for the entity
-        assert_eq!(changes[0].old_values, None);
-        assert!(changes[0].new_values.is_some());
+        // No old_values field anymore
+        assert!(changes[0].columns_json.is_some());
         
-        // Check that new_values contains the name
-        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
-        assert_eq!(new_values["name"], "Radiohead");
+        // Check that columns_json contains the name
+        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
+        assert_eq!(columns["name"], "Radiohead");
         Ok(())
     }
 
@@ -297,9 +297,9 @@ mod tests {
         assert_eq!(changes.len(), 2); // insert + update
         
         // Check the update change only contains the modified field
-        let update_new_values: serde_json::Value = serde_json::from_str(&changes[1].new_values.as_ref().unwrap())?;
-        assert_eq!(update_new_values["summary"], "Rock band");
-        assert!(update_new_values.get("name").is_none()); // name wasn't changed
+        let update_columns: serde_json::Value = serde_json::from_str(&changes[1].columns_json.as_ref().unwrap())?;
+        assert_eq!(update_columns["summary"], "Rock band");
+        assert!(update_columns.get("name").is_none()); // name wasn't changed
         Ok(())
     }
 
@@ -315,13 +315,13 @@ mod tests {
         
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1);
-        assert!(changes[0].old_values.is_none());
-        assert!(changes[0].new_values.is_some());
+        // No old_values field anymore
+        assert!(changes[0].columns_json.is_some());
         
-        // Check that summary is not included in new_values (it's null)
-        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
-        assert_eq!(new_values["name"], "Nirvana");
-        assert!(new_values.get("summary").is_none() || new_values["summary"].is_null());
+        // Check that summary is not included in columns_json (it's null)
+        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
+        assert_eq!(columns["name"], "Nirvana");
+        assert!(columns.get("summary").is_none() || columns["summary"].is_null());
         Ok(())
     }
 
@@ -355,10 +355,10 @@ mod tests {
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1);
         
-        // Check that only name is in new_values (summary column doesn't exist)
-        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
-        assert_eq!(new_values["name"], "Tool");
-        assert!(new_values.get("summary").is_none());
+        // Check that only name is in columns_json (summary column doesn't exist)
+        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
+        assert_eq!(columns["name"], "Tool");
+        assert!(columns.get("summary").is_none());
         Ok(())
     }
 
@@ -449,14 +449,14 @@ mod tests {
         
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1);
-        assert!(changes[0].new_values.is_some());
+        assert!(changes[0].columns_json.is_some());
         
-        // Parse the new_values JSON to check it includes the null field
-        let new_values: serde_json::Value = serde_json::from_str(&changes[0].new_values.as_ref().unwrap())?;
-        assert_eq!(new_values["name"], "Test Artist");
+        // Parse the columns_json to check it includes the null field
+        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
+        assert_eq!(columns["name"], "Test Artist");
         // The key point: summary should be present as null, not missing
-        assert!(new_values.get("summary").is_some(), "summary field should be present");
-        assert!(new_values["summary"].is_null(), "summary field should be null");
+        assert!(columns.get("summary").is_some(), "summary field should be present");
+        assert!(columns["summary"].is_null(), "summary field should be null");
         
         Ok(())
     }
@@ -484,12 +484,10 @@ mod tests {
         
         // Check the update change
         let update_change = &changes[1];
-        let new_values: serde_json::Value = serde_json::from_str(&update_change.new_values.as_ref().unwrap())?;
-        let old_values: serde_json::Value = serde_json::from_str(&update_change.old_values.as_ref().unwrap())?;
+        let columns: serde_json::Value = serde_json::from_str(&update_change.columns_json.as_ref().unwrap())?;
         
-        // Should track the change from null to "Now has a summary"
-        assert_eq!(new_values["summary"], "Now has a summary");
-        assert!(old_values["summary"].is_null());
+        // Should track the change to "Now has a summary"
+        assert_eq!(columns["summary"], "Now has a summary");
         
         Ok(())
     }

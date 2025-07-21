@@ -13,8 +13,7 @@ pub struct ChangeRecord {
     pub author_id: String,
     pub entity_type: String,
     pub entity_id: String,
-    pub old_values: Option<String>,
-    pub new_values: Option<String>,
+    pub columns_json: Option<String>,
     pub merged: bool,
 }
 
