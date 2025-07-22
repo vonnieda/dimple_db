@@ -18,6 +18,8 @@ struct Todo {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     // Initialize database
     let db_path = std::env::var("TODO_DB_PATH").unwrap_or_else(|_| "todo-gui.db".to_string());
     let db = Db::open(&db_path)?;
@@ -88,13 +90,10 @@ fn main() -> Result<()> {
         let sync_url_clone = sync_url.clone();
         let db_clone = db.clone();
         std::thread::spawn(move || {
+            let sync_engine = create_sync_engine(&sync_url_clone.unwrap()).unwrap();
             loop {
-                std::thread::sleep(Duration::from_secs(2));
-                if let Some(ref url) = sync_url_clone {
-                    if let Ok(engine) = create_sync_engine(url) {
-                        let _ = engine.sync(&db_clone);
-                    }
-                }
+                let _ = sync_engine.sync(&db_clone);
+                std::thread::sleep(Duration::from_secs(5));
             }
         });
     }
