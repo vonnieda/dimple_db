@@ -18,6 +18,7 @@ local-first applications, and is inspired by
 DimpleDb is **BETA** and should not yet be used for production data. Please
 report any issues you run into.
 
+
 ## Sync Engine
 
 DimpleDb's sync engine is implemented as a distributed change log ordered by 

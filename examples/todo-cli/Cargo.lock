@@ -2116,6 +2116,7 @@ dependencies = [
  "env_logger",
  "rusqlite_migration",
  "serde",
+ "url",
 ]
 
 [[package]]
