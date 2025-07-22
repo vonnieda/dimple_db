@@ -13,12 +13,12 @@ local-first applications, and is inspired by
 [Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
 
 
-# Status
+## Status
 
 DimpleDb is **BETA** and should not yet be used for production data. Please
 report any issues you run into.
 
-# Sync Engine
+## Sync Engine
 
 DimpleDb's sync engine is implemented as a distributed change log ordered by 
 [UUIDv7](https://datatracker.ietf.org/doc/html/draft-peabody-dispatch-new-uuid-format). 
@@ -35,21 +35,21 @@ level.
 See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 
 
-# Inspiration and Research
+## Inspiration and Research
 
-## Core Data
+### Core Data
 - [Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer)
 - [Tables and Fields of Core Data](https://fatbobman.com/en/posts/tables_and_fields_of_coredata/)
 - [Core Data + CloudKit: Basics](https://fatbobman.com/en/posts/coredatawithcloudkit-1/)
 
-## Encryption
+### Encryption
 - [age is a simple, modern and secure file encryption tool, format, and library](https://github.com/FiloSottile/age)
 
-## S3 Compatible Storage
+### S3 Compatible Storage
 - [Compare S3 storage pricing across major providers](https://www.s3compare.io/)
 - [Non-Amazon S3 Providers](https://github.com/s3fs-fuse/s3fs-fuse/wiki/Non-Amazon-S3)
 
-## Distributed Systems
+### Distributed Systems
 - [Ordering Distributed Events](https://medium.com/baseds/ordering-distributed-events-29c1dd9d1eff)
 - [Hybrid Logical Clocks](https://muratbuffalo.blogspot.com/2014/07/hybrid-logical-clocks.html)
 - [Logical Physical Clocks](https://cse.buffalo.edu/tech-reports/2014-04.pdf)
@@ -59,10 +59,10 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 - [Riffle Systems](https://riffle.systems/)
 - [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
 
-## Local First
+### Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)
 
-## Similar Projects
+### Similar Projects
 - [RxDB](https://github.com/pubkey/rxdb)
 - [Dexie.js](https://github.com/dexie/Dexie.js)
 - [WatermelondDB](https://github.com/nozbe/WatermelonDB)
