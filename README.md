@@ -14,8 +14,12 @@ local-first applications, and is inspired by
 
 ## Status
 
-DimpleDb is **BETA** and should not yet be used for production data. Please
-report any issues you run into.
+DimpleDb is **ALPHA** and should not yet be used for production data. Please
+[report any issues](https://github.com/vonnieda/dimple_db/issues) you run into.
+
+DimpleDb is a side quest for my main project, a [local first music player called
+Dimple](https://github.com/vonnieda/dimple). Dimple needs fast local storage that
+syncs and so DimpleDb is born.
 
 ## Quick Start
 
