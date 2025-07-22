@@ -115,7 +115,7 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 ### Similar Projects
 - [RxDB](https://github.com/pubkey/rxdb)
 - [Dexie.js](https://github.com/dexie/Dexie.js)
-- [WatermelondDB](https://github.com/nozbe/WatermelonDB)
+- [WatermelonDB](https://github.com/nozbe/WatermelonDB)
 - [Drift](https://github.com/simolus3/drift)
 - [Electric SQL](https://github.com/electric-sql/electric)
 - [LiveStore](https://github.com/livestorejs/livestore)	
