@@ -38,9 +38,9 @@ enum Commands {
     },
     /// List all todo items
     List,
-    /// Delete a todo item by ID (uses tombstone)
+    /// Delete a todo item by ID substring (uses tombstone)
     Delete {
-        /// Todo item ID to delete
+        /// Todo item ID substring to match
         id: String,
     },
     /// Watch for changes and sync continuously
@@ -313,15 +313,21 @@ fn list_todos(db: &Db) -> Result<()> {
 }
 
 fn delete_todo(db: &Db, id: &str) -> Result<()> {
-    // Find todos that end with the given ID suffix
+    // Require at least 3 characters for safety
+    if id.len() < 3 {
+        println!("ID substring must be at least 3 characters long");
+        return Ok(());
+    }
+    
+    // Find todos that contain the given ID substring
     let todos: Vec<Todo> = db.query(
         "SELECT * FROM Todo WHERE id LIKE ? AND _deleted = 0", 
-        [format!("%{}", id)]
+        [format!("%{}%", id)]
     )?;
     
     match todos.len() {
         0 => {
-            println!("No todo found with ID ending with '{}'", id);
+            println!("No todo found with ID containing '{}'", id);
             return Ok(());
         }
         1 => {
@@ -333,7 +339,7 @@ fn delete_todo(db: &Db, id: &str) -> Result<()> {
             println!("Deleted todo: {} - {}", id_suffix, todo.text);
         }
         _ => {
-            println!("Multiple todos found with ID ending with '{}'. Be more specific:", id);
+            println!("Multiple todos found with ID containing '{}'. Be more specific:", id);
             for todo in todos {
                 let id_suffix = &todo.id[todo.id.len().saturating_sub(8)..];
                 println!("  {} - {}", id_suffix, todo.text);

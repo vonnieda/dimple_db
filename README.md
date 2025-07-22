@@ -12,6 +12,51 @@ DimpleDb is designed for storing and syncing user data across devices in
 local-first applications, and is inspired by 
 [Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
 
+## Quick Start
+
+```rust
+use dimple_db::{Db, sync::SyncEngine};
+use serde::{Serialize, Deserialize};
+use rusqlite_migration::{Migrations, M};
+
+#[derive(Serialize, Deserialize)]
+struct Todo {
+    id: String,
+    text: String,
+    completed: bool,
+}
+
+// Open database and setup schema with migrations
+let db = Db::open("myapp.db")?;
+let migrations = Migrations::new(vec![
+    M::up("CREATE TABLE Todo (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        completed BOOLEAN NOT NULL DEFAULT 0
+    );"),
+]);
+db.migrate(&migrations)?;
+
+// Save a todo
+let todo = Todo {
+    id: String::new(),  // auto-generates UUIDv7
+    text: "Build cool app".to_string(),
+    completed: false,
+};
+let saved_todo = db.save(&todo)?;
+
+// Query todos
+let todos: Vec<Todo> = db.query("SELECT * FROM Todo WHERE completed = 0", ())?;
+
+// Setup encrypted sync to S3
+let sync = SyncEngine::builder()
+    .s3("https://s3.amazonaws.com", "bucket", "us-east-1", "KEY", "SECRET")?
+    .encrypted("passphrase")
+    .build()?;
+
+// Sync with other devices
+sync.sync(&db)?;
+```
 
 ## Status
 
