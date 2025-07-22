@@ -6,7 +6,7 @@ A Slint-based GUI application demonstrating DimpleDB's real-time synchronization
 
 - Add, toggle, and delete todo items
 - Real-time UI updates using DimpleDB's query subscriptions
-- Cross-device synchronization with QR code display
+- Cross-device synchronization
 - S3-based sync backend
 
 ## Running the Application
