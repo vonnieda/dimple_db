@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 
 use crate::{db::{ChangeRecord, Db, transaction::DbTransaction}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
 
@@ -203,9 +204,32 @@ impl SyncEngine {
             self.read_existing_entity(txn, entity_type, entity_id, &mut entity_json)?;
         }
 
-        // Apply all attribute changes
+        // Apply only changes that are actually the latest for each attribute
         for change in changes {
-            entity_json.insert(change.attribute, change.new_value);
+            // Query the changelog to find the latest change for this attribute
+            let latest_change_id: Option<String> = txn.txn().query_row(
+                "SELECT id FROM ZV_CHANGE 
+                 WHERE entity_type = ? AND entity_id = ? 
+                 AND json_extract(columns_json, ?) IS NOT NULL
+                 ORDER BY id DESC 
+                 LIMIT 1",
+                rusqlite::params![
+                    entity_type,
+                    entity_id,
+                    format!("$.{}", &change.attribute)
+                ],
+                |row| row.get(0)
+            ).optional()?;
+
+            // Only apply this change if it's the latest one for this attribute
+            if let Some(latest_id) = latest_change_id {
+                if latest_id == change.change_id {
+                    entity_json.insert(change.attribute, change.new_value);
+                }
+            } else {
+                // No existing change for this attribute, so apply it
+                entity_json.insert(change.attribute, change.new_value);
+            }
         }
 
         // Save the updated entity
