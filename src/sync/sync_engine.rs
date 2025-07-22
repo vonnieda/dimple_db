@@ -400,7 +400,7 @@ impl SyncEngineBuilder {
 mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{Db, sync::SyncEngine};
+    use crate::{Db, sync::SyncEngine, db::ChangeRecord};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
     struct Artist {
@@ -635,6 +635,125 @@ mod tests {
         assert!(!change_files.is_empty(), "No change files found with default prefix");
         assert!(change_files.iter().all(|f| f.starts_with("dimple-sync/changes/")), 
                 "Files don't have correct default prefix: {:?}", change_files);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_newer_local_changes_not_overwritten() -> anyhow::Result<()> {
+        // Test that syncing doesn't overwrite newer local changes with older remote changes
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        let db_a = Db::open_memory()?;
+        let db_b = Db::open_memory()?;
+        db_a.migrate(&migrations)?;
+        db_b.migrate(&migrations)?;
+        
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+        
+        // Step 1: Device A creates an artist
+        let artist = db_a.save(&Artist {
+            name: "The Beatles".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Step 2: Both devices sync - now both have the artist
+        sync_engine.sync(&db_a)?;
+        sync_engine.sync(&db_b)?;
+        
+        // Step 3: Device A updates the country to "UK"
+        let mut artist_a: Artist = db_a.get(&artist.id)?.unwrap();
+        artist_a.country = Some("UK".to_string());
+        db_a.save(&artist_a)?;
+        
+        // Step 4: Device A syncs (uploads the change)
+        sync_engine.sync(&db_a)?;
+        
+        // Step 5: BEFORE syncing, Device B updates the same field to "England" 
+        // This creates a NEWER change than A's "UK" change
+        let mut artist_b: Artist = db_b.get(&artist.id)?.unwrap();
+        artist_b.country = Some("England".to_string());
+        db_b.save(&artist_b)?;
+        
+        // Step 6: Device B syncs
+        // The sync should NOT overwrite B's newer "England" value with A's older "UK" value
+        sync_engine.sync(&db_b)?;
+        
+        // Verify that Device B still has "England" (the newer value)
+        let final_artist_b: Artist = db_b.get(&artist.id)?.unwrap();
+        assert_eq!(final_artist_b.country, Some("England".to_string()), 
+                   "Device B's newer change was overwritten by older remote change!");
+        
+        // Debug: Check the change records in device B
+        let changes_b: Vec<ChangeRecord> = db_b.query(
+            "SELECT * FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",
+            [&artist.id]
+        )?;
+        println!("Device B changes after sync:");
+        for change in &changes_b {
+            println!("  Change {}: merged={}, columns={:?}", 
+                     change.id, change.merged, change.columns_json);
+        }
+        
+        // After another sync cycle, both should converge to "England" (the newest value)
+        sync_engine.sync(&db_a)?;
+        let final_artist_a: Artist = db_a.get(&artist.id)?.unwrap();
+        assert_eq!(final_artist_a.country, Some("England".to_string()),
+                   "Devices did not converge to the newest value");
+        
+        Ok(())
+    }
+    
+    #[test]
+    fn test_merged_local_changes_not_overwritten() -> anyhow::Result<()> {
+        // Test a more specific scenario where local changes are already merged
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        let db_a = Db::open_memory()?;
+        let db_b = Db::open_memory()?;
+        db_a.migrate(&migrations)?;
+        db_b.migrate(&migrations)?;
+        
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+        
+        // Device A creates an artist
+        let artist = db_a.save(&Artist {
+            name: "The Beatles".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Both devices sync
+        sync_engine.sync(&db_a)?;
+        sync_engine.sync(&db_b)?;
+        
+        // Device A updates country to "UK" but DOESN'T sync yet
+        let mut artist_a: Artist = db_a.get(&artist.id)?.unwrap();
+        artist_a.country = Some("UK".to_string());
+        db_a.save(&artist_a)?;
+        
+        // Device B updates country to "England" and DOES sync
+        let mut artist_b: Artist = db_b.get(&artist.id)?.unwrap();
+        artist_b.country = Some("England".to_string());
+        db_b.save(&artist_b)?;
+        sync_engine.sync(&db_b)?;  // This marks B's change as merged
+        
+        // Now Device A syncs its older "UK" change
+        sync_engine.sync(&db_a)?;
+        
+        // Device B syncs again - should NOT overwrite "England" with "UK"
+        sync_engine.sync(&db_b)?;
+        
+        let final_artist_b: Artist = db_b.get(&artist.id)?.unwrap();
+        assert_eq!(final_artist_b.country, Some("England".to_string()), 
+                   "Device B's already-merged newer change was overwritten!");
         
         Ok(())
     }

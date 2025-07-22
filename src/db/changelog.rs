@@ -48,7 +48,7 @@ pub (crate) fn track_changes(txn: &DbTransaction, table_name: &str, entity_id: &
         let columns_json_str = Some(serde_json::to_string(&columns_json_map)?);
         
         txn.txn().execute(
-            "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, columns_json) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, columns_json, merged) VALUES (?, ?, ?, ?, ?, true)",
             rusqlite::params![
                 &change_id,
                 &author_id,
