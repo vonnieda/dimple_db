@@ -1,0 +1,111 @@
+import { Button, LineEdit, ListView, CheckBox, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export struct TodoItem {
+    id: string,
+    title: string,
+    completed: bool,
+}
+
+export component TodoApp inherits Window {
+    title: "Todo App - DimpleDB";
+    preferred-width: 600px;
+    preferred-height: 800px;
+    
+    in-out property <string> new-todo-text;
+    in-out property <[TodoItem]> todos: [];
+    
+    callback add-todo(string);
+    callback toggle-todo(string);
+    callback delete-todo(string);
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 20px;
+        
+        Text {
+            text: "Todo List";
+            font-size: 24px;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            
+            LineEdit {
+                placeholder-text: "Add a new todo...";
+                text <=> new-todo-text;
+                accepted => {
+                    if (new-todo-text != "") {
+                        add-todo(new-todo-text);
+                        new-todo-text = "";
+                    }
+                }
+            }
+            
+            Button {
+                text: "Add";
+                width: 80px;
+                enabled: new-todo-text != "";
+                clicked => {
+                    add-todo(new-todo-text);
+                    new-todo-text = "";
+                }
+            }
+        }
+        
+        ScrollView {
+            VerticalBox {
+                spacing: 5px;
+                
+                for todo in todos: Rectangle {
+                    height: 50px;
+                    background: todo.completed ? #f0f0f0 : white;
+                    border-radius: 5px;
+                    border-width: 1px;
+                    border-color: #e0e0e0;
+                    
+                    HorizontalBox {
+                        padding: 10px;
+                        spacing: 10px;
+                        alignment: center;
+                        
+                        CheckBox {
+                            checked: todo.completed;
+                            toggled => {
+                                toggle-todo(todo.id);
+                            }
+                        }
+                        
+                        Text {
+                            text: todo.title;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            font-size: 16px;
+                            color: todo.completed ? #888888 : black;
+                            overflow: elide;
+                        }
+                        
+                        Button {
+                            text: "Delete";
+                            width: 70px;
+                            clicked => {
+                                delete-todo(todo.id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            alignment: center;
+            
+            Text {
+                text: todos.length + " items";
+                vertical-alignment: center;
+            }
+        }
+    }
+}

@@ -4,3 +4,4 @@
 test_data
 examples/todo-cli/target
 todos.db
+examples/todo-gui/target

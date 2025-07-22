@@ -1,0 +1,15 @@
+[package]
+name = "todo-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dimple_db = { path = "../.." }
+slint = "1.9"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite_migration = "2.3"
+
+[build-dependencies]
+slint-build = "1.9"
