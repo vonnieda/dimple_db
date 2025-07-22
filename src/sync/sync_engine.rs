@@ -83,7 +83,7 @@ impl SyncEngine {
             self.put_remote_change(&change)?;
         }
 
-        // 4-8. Process unmerged changes
+        // 4-8. Process unmerged changes.
         self.merge_unmerged_changes(db)
     }
 
