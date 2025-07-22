@@ -91,6 +91,26 @@ level.
 See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 
 
+## Sponsoring DimpleDb
+
+If you like DimpleDb, and would like to help me keep working on it, please
+consider helping with one of the methods below. Open Source is my full time
+job and only source of income, and every single bit helps me keep working on 
+open source software full time:
+
+- BTC: 3FMNgdEjbVcxVoAUtgFFpzsuccnU9KMuhx
+- ETH: 0xf1CE557bE8645dC70e78Cbb601bAF2b3649169A0
+- DOGE: DGNKBH3AN4pUnHs9ZNQpC42ABzJG4mVF3t
+- Paypal: jason@vonnieda.org
+- Github: https://github.com/vonnieda
+- Venmo: @Jason-vonNieda-1
+- Ko-Fi: https://ko-fi.com/vonnieda
+- Buy Me a Coffee: https://www.buymeacoffee.com/vonnieda
+- Patreon: (Pending)
+- Merch: (Pending)
+- Something missing or wrong? <a href="mailto:jason@vonnieda.org">Let me know!</a>
+- Want to sponsor me? <a href="mailto:jason@vonnieda.org">Get in touch!</a>
+
 ## Inspiration and Research
 
 ### Core Data
@@ -128,3 +148,6 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 - [TinyBase](https://github.com/tinyplex/tinybase)	
 - [Dolthub](https://github.com/dolthub/dolt)
 
+
+## License
+DimpleDb is licensed under the [MIT License](https://mit-license.org/).
