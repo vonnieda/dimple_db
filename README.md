@@ -12,6 +12,11 @@ DimpleDb is designed for storing and syncing user data across devices in
 local-first applications, and is inspired by 
 [Apple's Core Data + CloudKit](https://developer.apple.com/documentation/CoreData/NSPersistentCloudKitContainer).
 
+## Status
+
+DimpleDb is **BETA** and should not yet be used for production data. Please
+report any issues you run into.
+
 ## Quick Start
 
 ```rust
@@ -19,7 +24,8 @@ use dimple_db::{Db, sync::SyncEngine};
 use serde::{Serialize, Deserialize};
 use rusqlite_migration::{Migrations, M};
 
-#[derive(Serialize, Deserialize)]
+// Entities are serde compatible Rust structs
+#[derive(Serialize, Deserialize, Default)]
 struct Todo {
     id: String,
     text: String,
@@ -38,15 +44,19 @@ let migrations = Migrations::new(vec![
 db.migrate(&migrations)?;
 
 // Save a todo
-let todo = Todo {
-    id: String::new(),  // auto-generates UUIDv7
+let todo = db.save(&Todo {
     text: "Build cool app".to_string(),
     completed: false,
-};
-let saved_todo = db.save(&todo)?;
+    ..Default::default()
+})?;
 
 // Query todos
 let todos: Vec<Todo> = db.query("SELECT * FROM Todo WHERE completed = 0", ())?;
+
+// Query subscribe to get updates
+let _sub = db.query_subscribe("SELECT * FROM Todo WHERE completed = 0", (), |todos| {
+    println!("Todos updated: {:?}", todos);
+})?;
 
 // Setup encrypted sync to S3
 let sync = SyncEngine::builder()
@@ -57,12 +67,6 @@ let sync = SyncEngine::builder()
 // Sync with other devices
 sync.sync(&db)?;
 ```
-
-## Status
-
-DimpleDb is **BETA** and should not yet be used for production data. Please
-report any issues you run into.
-
 
 ## Sync Engine
 
