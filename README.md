@@ -68,6 +68,8 @@ let sync = SyncEngine::builder()
 sync.sync(&db)?;
 ```
 
+For more, check out [the examples](https://github.com/vonnieda/dimple_db/tree/main/examples)!
+
 ## Sync Engine
 
 DimpleDb's sync engine is implemented as a distributed change log ordered by 
