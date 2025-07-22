@@ -15,17 +15,27 @@ struct AttributeChange {
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
+    prefix: String,
 }
 
 impl SyncEngine {
-    pub fn new_with_storage(storage: Box<dyn SyncStorage>) -> Result<Self> {
+    pub fn new_with_storage(storage: Box<dyn SyncStorage>, prefix: String) -> Result<Self> {
         Ok(SyncEngine {
             storage,
+            prefix,
         })
     }
 
     pub fn builder() -> SyncEngineBuilder {
         SyncEngineBuilder::default()
+    }
+
+    fn prefixed_path(&self, path: &str) -> String {
+        if self.prefix.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{}", self.prefix, path)
+        }
     }
 
     /// # Sync Algorithm
@@ -264,12 +274,12 @@ impl SyncEngine {
     }
 
     fn list_remote_change_ids(&self) -> Result<Vec<String>> {
-        let prefix = "changes/";
-        let files = self.storage.list(prefix)?;
+        let prefix = self.prefixed_path("changes/");
+        let files = self.storage.list(&prefix)?;
         
         let mut change_ids = Vec::new();
         for file in files {
-            if let Some(path) = file.strip_prefix(prefix) {
+            if let Some(path) = file.strip_prefix(&prefix) {
                 if let Some(change_id) = path.strip_suffix(".json") {
                     change_ids.push(change_id.to_string());
                 }
@@ -304,7 +314,7 @@ impl SyncEngine {
     }
 
     fn get_remote_change(&self, change_id: &str) -> Result<ChangeRecord> {
-        let path = format!("changes/{}.json", change_id);
+        let path = self.prefixed_path(&format!("changes/{}.json", change_id));
         let data = self.storage.get(&path)?;
         let change: ChangeRecord = serde_json::from_slice(&data)?;
         Ok(change)
@@ -328,7 +338,7 @@ impl SyncEngine {
     }
 
     fn put_remote_change(&self, change: &ChangeRecord) -> Result<()> {
-        let path = format!("changes/{}.json", change.id);
+        let path = self.prefixed_path(&format!("changes/{}.json", change.id));
         let data = serde_json::to_vec_pretty(change)?;
         self.storage.put(&path, &data)?;
         Ok(())
@@ -339,6 +349,7 @@ impl SyncEngine {
 pub struct SyncEngineBuilder {
     storage: Option<Box<dyn SyncStorage>>,
     passphrase: Option<String>,
+    prefix: Option<String>,
 }
 
 impl SyncEngineBuilder {
@@ -367,13 +378,20 @@ impl SyncEngineBuilder {
         self
     }
 
+    pub fn prefix(mut self, prefix: &str) -> Self {
+        self.prefix = Some(prefix.to_string());
+        self
+    }
+
     pub fn build(self) -> Result<SyncEngine> {
+        let prefix = self.prefix.unwrap_or_else(|| "dimple-sync".to_string());
+        
         if let Some(passphrase) = self.passphrase {
             let storage = EncryptedStorage::new(self.storage.unwrap(), passphrase);
-            SyncEngine::new_with_storage(Box::new(storage))
+            SyncEngine::new_with_storage(Box::new(storage), prefix)
         }
         else {
-            SyncEngine::new_with_storage(self.storage.unwrap())
+            SyncEngine::new_with_storage(self.storage.unwrap(), prefix)
         }
     }
 }
@@ -543,6 +561,80 @@ mod tests {
 
         assert_eq!(final_artist_a, final_artist_b);
         assert_eq!(final_artist_a, final_artist_c);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_engine_prefix() -> anyhow::Result<()> {
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+        ]);
+        
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        // Create sync engine with custom prefix
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .prefix("test-prefix-123")
+            .build()?;
+        
+        // Add data to db1
+        db1.save(&Artist {
+            name: "Test Artist".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Sync to storage
+        sync_engine.sync(&db1)?;
+        
+        // Verify that the storage contains files with the prefix
+        let change_files = sync_engine.storage.list("test-prefix-123/changes/")?;
+        assert!(!change_files.is_empty(), "No change files found with prefix");
+        assert!(change_files.iter().all(|f| f.starts_with("test-prefix-123/changes/")), 
+                "Files don't have correct prefix: {:?}", change_files);
+        
+        // Sync to db2 to verify it works end-to-end
+        sync_engine.sync(&db2)?;
+        
+        let artists2: Vec<Artist> = db2.query("SELECT * FROM Artist", ())?;
+        assert_eq!(artists2.len(), 1);
+        assert_eq!(artists2[0].name, "Test Artist");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_engine_default_prefix() -> anyhow::Result<()> {
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL);"),
+        ]);
+        
+        let db = Db::open_memory()?;
+        db.migrate(&migrations)?;
+        
+        // Create sync engine without specifying prefix (should use default)
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+        
+        // Add data
+        db.save(&Artist {
+            name: "Default Prefix Test".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Sync to storage
+        sync_engine.sync(&db)?;
+        
+        // Verify that the storage contains files with the default prefix
+        let change_files = sync_engine.storage.list("dimple-sync/changes/")?;
+        assert!(!change_files.is_empty(), "No change files found with default prefix");
+        assert!(change_files.iter().all(|f| f.starts_with("dimple-sync/changes/")), 
+                "Files don't have correct default prefix: {:?}", change_files);
         
         Ok(())
     }

@@ -68,7 +68,7 @@ See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
 - [WatermelondDB](https://github.com/nozbe/WatermelonDB)
 - [Drift](https://github.com/simolus3/drift)
 - [Electric SQL](https://github.com/electric-sql/electric)
-- [LiveStore](https://livestore.dev/)	
+- [LiveStore](https://github.com/livestorejs/livestore)	
 - [TinyBase](https://github.com/tinyplex/tinybase)	
-- [Dolthub](https://www.dolthub.com/)
+- [Dolthub](https://github.com/dolthub/dolt)
 

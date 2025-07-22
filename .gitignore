@@ -2,3 +2,5 @@
 /private
 .claude
 test_data
+examples/todo-cli/target
+todos.db

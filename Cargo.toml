@@ -2,7 +2,7 @@
 name = "dimple_db"
 version = "0.1.0"
 edition = "2021"
-description = "Reactive data store with S3 compatible synchronization based on SQLite"
+description = "DimpleDb is a reactive data store and sync engine for Rust, based on SQLite."
 license = "MIT"
 repository = "https://github.com/vonnieda/dimple_db"
 homepage = "https://github.com/vonnieda/dimple_db"
