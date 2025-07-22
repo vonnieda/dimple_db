@@ -2,9 +2,10 @@ use anyhow::Result;
 use dimple_db::{Db, sync::SyncEngine};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
-use slint::{ComponentHandle, VecModel};
+use slint::{ComponentHandle, VecModel, Image, Rgba8Pixel, SharedPixelBuffer};
 use std::rc::Rc;
 use std::time::Duration;
+use qrcode::{QrCode, Color};
 
 slint::include_modules!();
 
@@ -32,6 +33,13 @@ fn main() -> Result<()> {
     // Create the UI
     let ui = TodoApp::new()?;
     let ui_handle = ui.as_weak();
+    
+    // Set QR code if sync URL is available
+    if let Some(ref url) = sync_url {
+        if let Ok(qr_image) = generate_qr_code_image(url) {
+            ui.set_qr_code(qr_image);
+        }
+    }
     
     // Set up query subscription for real-time updates (calls callback immediately with current data)
     let ui_handle_for_subscription = ui_handle.clone();
@@ -98,6 +106,54 @@ fn main() -> Result<()> {
     drop(_subscription);
     
     Ok(())
+}
+
+fn generate_qr_code_image(sync_url: &str) -> Result<Image> {
+    let qr = QrCode::new(sync_url)?;
+    
+    // Get the QR code as a 2D boolean matrix
+    let modules = qr.to_colors();
+    let size = (modules.len() as f64).sqrt() as u32;
+    
+    // Scale up the QR code for better visibility
+    let scale = 8;
+    let scaled_size = size * scale;
+    
+    let mut rgba_buffer = vec![0u8; (scaled_size * scaled_size * 4) as usize];
+    
+    for y in 0..size {
+        for x in 0..size {
+            let color = modules[(y * size + x) as usize];
+            let rgba = match color {
+                Color::Dark => [0u8, 0, 0, 255],
+                Color::Light => [255u8, 255, 255, 255],
+            };
+            
+            // Scale up the pixel
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let scaled_x = x * scale + dx;
+                    let scaled_y = y * scale + dy;
+                    let idx = ((scaled_y * scaled_size + scaled_x) * 4) as usize;
+                    
+                    if idx + 3 < rgba_buffer.len() {
+                        rgba_buffer[idx] = rgba[0];     // R
+                        rgba_buffer[idx + 1] = rgba[1]; // G
+                        rgba_buffer[idx + 2] = rgba[2]; // B
+                        rgba_buffer[idx + 3] = rgba[3]; // A
+                    }
+                }
+            }
+        }
+    }
+    
+    let pixel_buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+        &rgba_buffer,
+        scaled_size,
+        scaled_size,
+    );
+    
+    Ok(Image::from_rgba8(pixel_buffer))
 }
 
 fn create_sync_engine(sync_url: &str) -> Result<SyncEngine> {

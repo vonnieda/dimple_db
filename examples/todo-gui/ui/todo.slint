@@ -8,11 +8,12 @@ export struct TodoItem {
 
 export component TodoApp inherits Window {
     title: "Todo App - DimpleDB";
-    preferred-width: 600px;
-    preferred-height: 800px;
+    preferred-width: 800px;
+    preferred-height: 900px;
     
     in-out property <string> new-todo-text;
     in-out property <[TodoItem]> todos: [];
+    in-out property <image> qr-code;
     
     callback add-todo(string);
     callback toggle-todo(string);
@@ -105,6 +106,50 @@ export component TodoApp inherits Window {
             Text {
                 text: todos.length + " items";
                 vertical-alignment: center;
+            }
+        }
+        
+        if qr-code.width > 0 : Rectangle {
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #dee2e6;
+            padding: 20px;
+            
+            VerticalBox {
+                spacing: 15px;
+                alignment: center;
+                
+                Text {
+                    text: "Sync Configuration";
+                    font-size: 18px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+                
+                Rectangle {
+                    background: white;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #ccc;
+                    padding: 10px;
+                    width: self.height;
+                    height: 200px;
+                    
+                    Image {
+                        source: qr-code;
+                        width: 100%;
+                        height: 100%;
+                        image-fit: contain;
+                    }
+                }
+                
+                Text {
+                    text: "Scan QR code to sync with other devices";
+                    font-size: 14px;
+                    color: #666;
+                    horizontal-alignment: center;
+                }
             }
         }
     }
