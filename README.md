@@ -88,7 +88,7 @@ files, which are encrypted with [age](https://github.com/FiloSottile/age).
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
 
-See more about the design in [SYNC_ENGINE.md](SYNC_ENGINE.md).
+See more about the design in [SYNC_ENGINE.md](docs/SYNC_ENGINE.md).
 
 
 ## Sponsoring DimpleDb
@@ -132,6 +132,8 @@ open source software full time:
 - [Iroh gives you an API for dialing by public key](https://github.com/n0-computer/iroh)
 - [Riffle Systems](https://riffle.systems/)
 - [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
+- [Willow](https://willowprotocol.org)
+- [Willow Compared](https://willowprotocol.org/more/compare/index.html#willow_compared)
 
 ### Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)

@@ -5,3 +5,6 @@ test_data
 examples/todo-cli/target
 todos.db
 examples/todo-gui/target
+examples/todo-gui/todo-gui.db
+examples/todo-gui/todo-gui.db-shm
+examples/todo-gui/todo-gui.db-wal
