@@ -137,7 +137,6 @@ fn parse_sync_url(url: &str) -> Result<SyncEngine> {
             let prefix = path_segs[1..].join("/");
             let region = url.query_pairs().find(|qp| qp.0 == "region")
                 .map(|qp| qp.1).unwrap_or_default();
-            dbg!(&access_key, &secret_key, &endpoint, &bucket_name, &prefix, &region);
             SyncEngine::builder()
                 .s3(endpoint, bucket_name, &region, access_key, secret_key)?
                 .prefix(&prefix)
