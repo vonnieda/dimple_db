@@ -106,8 +106,6 @@ open source software full time:
 - Venmo: @Jason-vonNieda-1
 - Ko-Fi: https://ko-fi.com/vonnieda
 - Buy Me a Coffee: https://www.buymeacoffee.com/vonnieda
-- Patreon: (Pending)
-- Merch: (Pending)
 - Something missing or wrong? <a href="mailto:jason@vonnieda.org">Let me know!</a>
 - Want to sponsor me? <a href="mailto:jason@vonnieda.org">Get in touch!</a>
 
