@@ -36,8 +36,10 @@ struct Todo {
     completed: bool,
 }
 
-// Open database and setup schema with migrations
+// Open or create a database
 let db = Db::open("myapp.db")?;
+
+// Migrations via rusqlite_migration
 let migrations = Migrations::new(vec![
     M::up("CREATE TABLE Todo (
         id TEXT PRIMARY KEY,
@@ -134,6 +136,7 @@ open source software full time:
 - [Riffle: Reactive Relational State for Local-First Applications](https://dl.acm.org/doi/pdf/10.1145/3586183.3606801)
 - [Willow](https://willowprotocol.org)
 - [Willow Compared](https://willowprotocol.org/more/compare/index.html#willow_compared)
+- [Willow Sideloading](https://willowprotocol.org/specs/sideloading/index.html#sideloading)
 
 ### Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)
