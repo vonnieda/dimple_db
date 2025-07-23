@@ -22,11 +22,11 @@ cargo run
 Set the `TODO_SYNC_URL` environment variable to enable cross-device synchronization:
 
 ```bash
-export TODO_SYNC_URL="s3://access_key:secret_key@endpoint/bucket/region"
+export TODO_SYNC_URL="s3://access_key:secret_key@endpoint/bucket/prefix?region=us-east-1"
 cargo run
 ```
 
-The sync URL format is: `s3://access_key:secret_key@endpoint/bucket/region`
+The sync URL format is: `s3://access_key:secret_key@endpoint/bucket/prefix?region=us-east-1`
 
 When a sync URL is provided, the app will:
 - Automatically sync changes every 5 seconds

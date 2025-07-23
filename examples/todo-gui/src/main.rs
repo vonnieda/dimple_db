@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use dimple_db::{Db, sync::SyncEngine};
 use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, VecModel};
+use url::Url;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -83,7 +84,7 @@ fn main() -> Result<()> {
         let sync_url_clone = sync_url.clone();
         let db_clone = db.clone();
         std::thread::spawn(move || {
-            let sync_engine = create_sync_engine(&sync_url_clone.unwrap()).unwrap();
+            let sync_engine = parse_sync_url(&sync_url_clone.unwrap()).unwrap();
             loop {
                 let _ = sync_engine.sync(&db_clone);
                 std::thread::sleep(Duration::from_secs(5));
@@ -100,32 +101,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-
-fn create_sync_engine(sync_url: &str) -> Result<SyncEngine> {
-    // Parse URL format: s3://access_key:secret_key@endpoint/bucket/region
-    if let Some(url) = sync_url.strip_prefix("s3://") {
-        let parts: Vec<&str> = url.splitn(2, '@').collect();
-        if parts.len() == 2 {
-            let creds: Vec<&str> = parts[0].splitn(2, ':').collect();
-            let location: Vec<&str> = parts[1].splitn(3, '/').collect();
-            
-            if creds.len() == 2 && location.len() == 3 {
-                let engine = SyncEngine::builder()
-                    .s3(location[0], location[1], location[2], creds[0], creds[1])?
-                    .prefix("todo-gui")
-                    .build()?;
-                Ok(engine)
-            } else {
-                Err(anyhow::anyhow!("Invalid S3 URL format"))
-            }
-        } else {
-            Err(anyhow::anyhow!("Invalid S3 URL format"))
-        }
-    } else {
-        Err(anyhow::anyhow!("Only S3 URLs are supported"))
-    }
-}
-
 fn update_ui_todos(ui: &TodoApp, todos: Vec<Todo>) {
     let todo_items: Vec<TodoItem> = todos
         .into_iter()
@@ -138,4 +113,65 @@ fn update_ui_todos(ui: &TodoApp, todos: Vec<Todo>) {
     
     let model = Rc::new(VecModel::from(todo_items));
     ui.set_todos(model.into());
+}
+
+/// Parse a url in one of the following formats and return a SyncEngine
+/// configured with the results.
+/// 
+/// Valid url formats:
+/// - s3://access_key:secret_key@endpoint/bucket/prefix?region=us-east-1
+/// - memory://prefix
+/// - file://base_path
+/// 
+fn parse_sync_url(url: &str) -> Result<SyncEngine> {
+    let url = Url::parse(url)?;
+    match url.scheme() {
+        "s3" => {
+            let access_key = url.username();
+            let secret_key = url.password().ok_or_else(|| anyhow!("secret key is required"))?;
+            let endpoint = url.host_str().ok_or_else(|| anyhow!("endpoint is required"))?;
+            let path_segs = url.path_segments()
+                .ok_or_else(|| anyhow!("bucket is required"))?
+                .collect::<Vec<_>>();
+            let bucket_name = path_segs.get(0).ok_or_else(|| anyhow!("bucket name is required"))?;
+            let prefix = path_segs[1..].join("/");
+            let region = url.query_pairs().find(|qp| qp.0 == "region")
+                .map(|qp| qp.1).unwrap_or_default();
+            dbg!(&access_key, &secret_key, &endpoint, &bucket_name, &prefix, &region);
+            SyncEngine::builder()
+                .s3(endpoint, bucket_name, &region, access_key, secret_key)?
+                .prefix(&prefix)
+                .build()
+        },
+        "memory" => {
+            let prefix = url.path();
+            SyncEngine::builder()
+                .in_memory()
+                .prefix(&prefix)
+                .build()
+        },
+        "file" => {
+            let base_path = url.path();
+            SyncEngine::builder()
+                .local(base_path)
+                .build()
+        },
+        _ => Err(anyhow!("invalid sync url format")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_sync_url;
+
+    #[test]
+    fn test_parse_sync_url() {
+        assert!(parse_sync_url("s3://access_key:secret_key@endpoint/bucket/prefix1/prefix2?region=us-east-1").is_ok());
+        assert!(parse_sync_url("memory://").is_ok());
+        assert!(parse_sync_url("memory://prefix").is_ok());
+        assert!(parse_sync_url("file://base_path").is_ok());
+        assert!(parse_sync_url("").is_err());
+        assert!(parse_sync_url("http://example.com").is_err());
+        assert!(parse_sync_url("https://example.com").is_err());
+    }
 }
