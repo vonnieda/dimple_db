@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rusqlite::OptionalExtension;
 
 use crate::{db::{ChangeRecord, Db, transaction::DbTransaction}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
@@ -59,33 +60,58 @@ impl SyncEngine {
     ///     3. Save the entity
     pub fn sync(&self, db: &Db) -> Result<()> {
         // 1. Get the sets of local and remote change_ids.
+        log::debug!("Sync: Getting change lists.");
         let local_change_ids = self.list_local_change_ids(db)?
             .into_iter().collect::<HashSet<_>>();
         let remote_change_ids = self.list_remote_change_ids()?
             .into_iter().collect::<HashSet<_>>();
+
+        log::debug!("Sync: Syncing {} local and {} remote changes.", 
+            local_change_ids.len(), remote_change_ids.len());
 
         // 2. For any remote change_id not in the local set, download and insert
         // it, setting merged = false. 
         let missing_remote_change_ids = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        for remote_change_id in missing_remote_change_ids {
-            let mut change = self.get_remote_change(remote_change_id)?;
-            change.merged = false;
-            self.put_local_change(db, &change)?;
-        }
+        log::debug!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
+        // Parallel version
+        missing_remote_change_ids.par_iter().for_each(|remote_change_id| {
+            if let Ok(mut change) = self.get_remote_change(remote_change_id) {
+                change.merged = false;
+                // TODO error
+                let _ = self.put_local_change(db, &change);
+            }
+        });
+        // Serial version
+        // for remote_change_id in missing_remote_change_ids {
+        //     let mut change = self.get_remote_change(remote_change_id)?;
+        //     change.merged = false;
+        //     self.put_local_change(db, &change)?;
+        // }
 
         // 3. For any local change_id not in the remote set, upload it.
         let missing_local_change_ids = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        for local_change_id in missing_local_change_ids {
-            let change = self.get_local_change(db, local_change_id)?;
-            self.put_remote_change(&change)?;
-        }
+        log::debug!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
+        // Parallel version
+        missing_local_change_ids.par_iter().for_each(|local_change_id| {
+            if let Ok(change) = self.get_local_change(db, local_change_id) {
+                // TODO error
+                let _ = self.put_remote_change(&change);
+            }
+        });
+        // Serial version
+        // for local_change_id in missing_local_change_ids {
+        //     let change = self.get_local_change(db, local_change_id)?;
+        //     self.put_remote_change(&change)?;
+        // }
 
         // 4-8. Process unmerged changes.
-        self.merge_unmerged_changes(db)
+        let result = self.merge_unmerged_changes(db);
+        log::debug!("Sync: Done. =============");
+        result
     }
 
     fn merge_unmerged_changes(&self, db: &Db) -> Result<()> {
@@ -99,6 +125,8 @@ impl SyncEngine {
                  ORDER BY id",
                 ()
             )?;
+
+            log::debug!("Sync: Merging {} new changes.", unmerged_changes.len());
 
             // Extract individual attribute changes
             // Vec<AttributeChange>
@@ -315,26 +343,8 @@ impl SyncEngine {
     }
 
     fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangeRecord> {
-        db.transaction(|txn| {
-            let mut stmt = txn.txn().prepare(
-                "SELECT id, author_id, entity_type, entity_id, columns_json, merged
-                 FROM ZV_CHANGE 
-                 WHERE id = ?"
-            )?;
-            
-            let change = stmt.query_row(rusqlite::params![change_id], |row| {
-                Ok(ChangeRecord {
-                    id: row.get(0)?,
-                    author_id: row.get(1)?,
-                    entity_type: row.get(2)?,
-                    entity_id: row.get(3)?,
-                    columns_json: row.get(4)?,
-                    merged: row.get(5)?,
-                })
-            })?;
-            
-            Ok(change)
-        })
+        let results = db.query::<ChangeRecord, _>("SELECT * FROM ZV_CHANGE WHERE id = ?", (change_id,))?;
+        results.into_iter().next().ok_or_else(|| anyhow!("not found"))
     }
 
     fn get_remote_change(&self, change_id: &str) -> Result<ChangeRecord> {

@@ -134,11 +134,15 @@ fn parse_sync_url(url: &str) -> Result<SyncEngine> {
                 .ok_or_else(|| anyhow!("bucket is required"))?
                 .collect::<Vec<_>>();
             let bucket_name = path_segs.get(0).ok_or_else(|| anyhow!("bucket name is required"))?;
+            if bucket_name.is_empty() {
+                return Err(anyhow!("bucket name is required"))
+            }
             let prefix = path_segs[1..].join("/");
             let region = url.query_pairs().find(|qp| qp.0 == "region")
                 .map(|qp| qp.1).unwrap_or_default();
             SyncEngine::builder()
                 .s3(endpoint, bucket_name, &region, access_key, secret_key)?
+                // .encrypted("correct horse battery staple")
                 .prefix(&prefix)
                 .build()
         },
@@ -166,6 +170,9 @@ mod tests {
     #[test]
     fn test_parse_sync_url() {
         assert!(parse_sync_url("s3://access_key:secret_key@endpoint/bucket/prefix1/prefix2?region=us-east-1").is_ok());
+        assert!(parse_sync_url("s3://access_key:secret_key@endpoint/bucket/prefix1/prefix2").is_ok());
+        assert!(parse_sync_url("s3://access_key:secret_key@endpoint/bucket").is_ok());
+        assert!(parse_sync_url("s3://access_key:secret_key@endpoint/").is_err());
         assert!(parse_sync_url("memory://").is_ok());
         assert!(parse_sync_url("memory://prefix").is_ok());
         assert!(parse_sync_url("file://base_path").is_ok());

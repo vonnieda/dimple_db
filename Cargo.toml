@@ -16,6 +16,7 @@ include_dir = "0.7.4"
 log = "0.4"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.31.0"
+rayon = "1.10.0"
 rusqlite = { version = "0.37", features = ["bundled", "functions"] }
 rusqlite_migration = { version = "2.3", features = ["from-directory"] }
 rust-s3 = { version = "0.33.0", features = ["sync-native-tls"], default-features = false }
