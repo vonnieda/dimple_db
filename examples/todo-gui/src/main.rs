@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
+use dimple_db::db::{Migrations, M};
 use dimple_db::{Db, sync::SyncEngine};
-use rusqlite_migration::{Migrations, M};
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, VecModel};
 use url::Url;
