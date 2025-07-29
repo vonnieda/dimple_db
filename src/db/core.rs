@@ -146,7 +146,7 @@ impl Db {
         Ok(db)
     }
 
-    pub(crate) fn table_name_for_type<T>(&self) -> Result<String> {
+    pub fn table_name_for_type<T>(&self) -> Result<String> {
         let full_name = std::any::type_name::<T>();
         // Extract just the struct name from the full path
         Ok(full_name.split("::").last().unwrap_or(full_name).to_string())
@@ -211,9 +211,6 @@ mod tests {
         db.migrate(&migrations)?;
         Ok(db)
     }
-
-
-
 
     // Database Operations
     #[test]
@@ -501,6 +498,59 @@ mod tests {
         // Cleanup temporary database file
         std::fs::remove_file(&db_path).ok();
         
+        Ok(())
+    }
+
+    #[test]
+    fn test_blob() -> anyhow::Result<()> {
+        #[derive(Serialize, Deserialize, Default, Debug)]
+        pub struct TestBlob {
+            pub id: String,
+            pub blob_data: Vec<u8>,
+        }
+
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE TestBlob (id TEXT NOT NULL PRIMARY KEY, blob_data BLOB NOT NULL);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        let test_blob = db.save(&TestBlob {
+            blob_data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a].to_vec(),
+            ..Default::default()
+        })?;
+        assert!(test_blob.blob_data.len() == 8);
+
+        // Fails with: Error: Serialization is not supported from type: u64
+        // Okay, so actually the problem is in serde_json::Value not having a
+        // native type for an array of bytes. It converts them to u64.
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_u64() -> anyhow::Result<()> {
+        #[derive(Serialize, Deserialize, Default, Debug)]
+        pub struct TestU64 {
+            pub id: String,
+            pub val: u64,
+        }
+
+        let db = Db::open_memory()?;
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE TestU64 (id TEXT NOT NULL PRIMARY KEY, val U64);"),
+        ]);
+        db.migrate(&migrations)?;
+        
+        // TODO note, u64::MAX fails because Sqlite stores ints as i64. Larger
+        // requires conversion. I think it would be better to explicitly
+        // disallow u64 and explicitly allow i64.
+        let saved = db.save(&TestU64 {
+            val: u64::MAX / 2,
+            ..Default::default()
+        })?;
+        
+        assert_eq!(saved.val, u64::MAX / 2);
         Ok(())
     }
 
