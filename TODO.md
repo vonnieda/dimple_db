@@ -34,7 +34,15 @@ suggestions: https://claude.ai/chat/9009b669-2233-4079-8962-ed775723cad2
     3. serde_cbor::Value
     4. Custom Enum Type
 
+Okay, tried a bunch of those and nothing worked except cbor with serde_bytes
+but that is clumsy, so no.
+
+    1. One idea: Type alias for BTreeMap<String, rusqlite::Value> can be the IT
+    and then I'll just drop serde_rusqlite entirely.
+    2. Another: Convert to params immediately, and just use that as IT.
+
 3. So started to look at everywhere we're using serde_json::Value and
 figured best to start by merging / removing save_dynamic vs.
 save_internal. And their code differs by quite a bit, so was comparing
 those.
+

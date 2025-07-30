@@ -3,8 +3,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Result};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rusqlite::OptionalExtension;
+use rmpv::Value as MsgPackValue;
 
-use crate::{db::{ChangeRecord, Db, transaction::DbTransaction}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+use crate::{db::{ChangeRecord, ChangeFieldRecord, RemoteChangeRecord, RemoteFieldRecord, Db, transaction::DbTransaction, changelog::msgpack_to_sql_value}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+
+// Helper function is no longer needed since we're working directly with rusqlite::types::Value
 
 #[derive(Debug)]
 struct AttributeChange {
@@ -12,7 +15,7 @@ struct AttributeChange {
     entity_type: String,
     entity_id: String,
     attribute: String,
-    new_value: serde_json::Value,
+    new_value: rusqlite::types::Value,
 }
 
 pub struct SyncEngine {
@@ -75,38 +78,24 @@ impl SyncEngine {
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::debug!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
-        // Parallel version
         missing_remote_change_ids.par_iter().for_each(|remote_change_id| {
-            if let Ok(mut change) = self.get_remote_change(remote_change_id) {
-                change.merged = false;
-                // TODO error
-                let _ = self.put_local_change(db, &change);
+            if let Ok(remote_change) = self.get_remote_change(remote_change_id) {
+                // TODO handle error
+                let _ = self.put_local_change(db, &remote_change);
             }
         });
-        // Serial version
-        // for remote_change_id in missing_remote_change_ids {
-        //     let mut change = self.get_remote_change(remote_change_id)?;
-        //     change.merged = false;
-        //     self.put_local_change(db, &change)?;
-        // }
 
         // 3. For any local change_id not in the remote set, upload it.
         let missing_local_change_ids = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::debug!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
-        // Parallel version
         missing_local_change_ids.par_iter().for_each(|local_change_id| {
-            if let Ok(change) = self.get_local_change(db, local_change_id) {
-                // TODO error
-                let _ = self.put_remote_change(&change);
+            if let Ok(remote_change) = self.get_local_change_as_remote(db, local_change_id) {
+                // TODO handle error
+                let _ = self.put_remote_change(&remote_change);
             }
         });
-        // Serial version
-        // for local_change_id in missing_local_change_ids {
-        //     let change = self.get_local_change(db, local_change_id)?;
-        //     self.put_remote_change(&change)?;
-        // }
 
         // 4-8. Process unmerged changes.
         let result = self.merge_unmerged_changes(db);
@@ -119,7 +108,7 @@ impl SyncEngine {
             // Get unmerged changes
             // Vec<ChangeRecord>
             let unmerged_changes = txn.query::<ChangeRecord, _>(
-                "SELECT id, author_id, entity_type, entity_id, columns_json, merged 
+                "SELECT id, author_id, entity_type, entity_id, merged 
                  FROM ZV_CHANGE 
                  WHERE merged = false 
                  ORDER BY id",
@@ -130,7 +119,7 @@ impl SyncEngine {
 
             // Extract individual attribute changes
             // Vec<AttributeChange>
-            let attribute_changes = self.extract_attribute_changes(&unmerged_changes)?;
+            let attribute_changes = self.extract_attribute_changes(txn, &unmerged_changes)?;
 
             // Reduce to newest changes per attribute
             // HashMap<(entity_type, entity_id, attribute), AttributeChange>
@@ -165,21 +154,26 @@ impl SyncEngine {
         })
     }
 
-    fn extract_attribute_changes(&self, unmerged_changes: &[ChangeRecord]) -> Result<Vec<AttributeChange>> {
+    fn extract_attribute_changes(&self, txn: &DbTransaction, unmerged_changes: &[ChangeRecord]) -> Result<Vec<AttributeChange>> {
         let mut attribute_changes = Vec::new();
 
         for change in unmerged_changes {
-            if let Some(columns_json) = &change.columns_json {
-                if let Ok(columns) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(columns_json) {
-                    for (attribute, value) in columns {
-                        attribute_changes.push(AttributeChange {
-                            change_id: change.id.clone(),
-                            entity_type: change.entity_type.clone(),
-                            entity_id: change.entity_id.clone(),
-                            attribute,
-                            new_value: value,
-                        });
-                    }
+            // Query the field changes for this change record
+            let field_records = txn.query::<ChangeFieldRecord, _>(
+                "SELECT change_id, field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?",
+                [&change.id]
+            )?;
+            
+            for field_record in field_records {
+                if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
+                    let value = msgpack_to_sql_value(&msgpack_value);
+                    attribute_changes.push(AttributeChange {
+                        change_id: change.id.clone(),
+                        entity_type: change.entity_type.clone(),
+                        entity_id: change.entity_id.clone(),
+                        attribute: field_record.field_name,
+                        new_value: value,
+                    });
                 }
             }
         }
@@ -223,28 +217,28 @@ impl SyncEngine {
     }
 
     fn apply_entity_updates(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, changes: Vec<AttributeChange>) -> Result<()> {
-        // Start with entity ID
-        let mut entity_json = serde_json::Map::new();
-        entity_json.insert("id".to_string(), serde_json::Value::String(entity_id.to_string()));
-
-        // Read existing entity if it exists
-        if self.entity_exists(txn, entity_type, entity_id)? {
-            self.read_existing_entity(txn, entity_type, entity_id, &mut entity_json)?;
-        }
-
+        let exists = self.entity_exists(txn, entity_type, entity_id)?;
+        
+        // Get table columns
+        let column_names = txn.db().table_column_names(txn.txn(), entity_type)?;
+        
+        // Build a map of column -> value for the changes we need to apply
+        let mut updates: HashMap<String, rusqlite::types::Value> = HashMap::new();
+        
         // Apply only changes that are actually the latest for each attribute
         for change in changes {
             // Query the changelog to find the latest change for this attribute
             let latest_change_id: Option<String> = txn.txn().query_row(
-                "SELECT id FROM ZV_CHANGE 
-                 WHERE entity_type = ? AND entity_id = ? 
-                 AND json_extract(columns_json, ?) IS NOT NULL
-                 ORDER BY id DESC 
+                "SELECT c.id FROM ZV_CHANGE c 
+                 JOIN ZV_CHANGE_FIELD cf ON c.id = cf.change_id 
+                 WHERE c.entity_type = ? AND c.entity_id = ? 
+                 AND cf.field_name = ?
+                 ORDER BY c.id DESC 
                  LIMIT 1",
                 rusqlite::params![
                     entity_type,
                     entity_id,
-                    format!("$.{}", &change.attribute)
+                    &change.attribute
                 ],
                 |row| row.get(0)
             ).optional()?;
@@ -252,16 +246,62 @@ impl SyncEngine {
             // Only apply this change if it's the latest one for this attribute
             if let Some(latest_id) = latest_change_id {
                 if latest_id == change.change_id {
-                    entity_json.insert(change.attribute, change.new_value);
+                    updates.insert(change.attribute, change.new_value);
                 }
             } else {
                 // No existing change for this attribute, so apply it
-                entity_json.insert(change.attribute, change.new_value);
+                updates.insert(change.attribute, change.new_value);
             }
         }
-
-        // Save the updated entity
-        txn.save_dynamic(entity_type, &entity_json)?;
+        
+        if updates.is_empty() {
+            return Ok(());
+        }
+        
+        if exists {
+            // Build UPDATE statement
+            let set_clauses: Vec<String> = updates.keys()
+                .filter(|col| column_names.contains(col))
+                .map(|col| format!("{} = ?", col))
+                .collect();
+            
+            if set_clauses.is_empty() {
+                return Ok(());
+            }
+            
+            let sql = format!("UPDATE {} SET {} WHERE id = ?", entity_type, set_clauses.join(", "));
+            
+            // Build parameters
+            let mut params: Vec<rusqlite::types::Value> = updates.iter()
+                .filter(|(col, _)| column_names.contains(col))
+                .map(|(_, val)| val.clone())
+                .collect();
+            params.push(rusqlite::types::Value::Text(entity_id.to_string()));
+            
+            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+        } else {
+            // Build INSERT statement
+            let mut insert_columns = vec!["id"];
+            let mut placeholders = vec!["?"];
+            let mut params = vec![rusqlite::types::Value::Text(entity_id.to_string())];
+            
+            for col in &column_names {
+                if col != "id" && updates.contains_key(col) {
+                    insert_columns.push(col);
+                    placeholders.push("?");
+                    params.push(updates.get(col).unwrap().clone());
+                }
+            }
+            
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES ({})", 
+                entity_type, 
+                insert_columns.join(", "),
+                placeholders.join(", ")
+            );
+            
+            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+        }
 
         Ok(())
     }
@@ -274,53 +314,8 @@ impl SyncEngine {
         ).is_ok())
     }
 
-    fn read_existing_entity(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, entity_json: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
-        let query = format!("SELECT * FROM {} WHERE id = ?", entity_type);
-        let mut stmt = txn.txn().prepare(&query)?;
-        
-        let column_names: Vec<String> = stmt.column_names()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // TODO smells
-        stmt.query_row(rusqlite::params![entity_id], |row| {
-            for (idx, column_name) in column_names.iter().enumerate() {
-                if column_name != "id" {
-                    // Try to get value as different types
-                    if let Ok(val) = row.get::<_, Option<String>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<i64>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(|v| serde_json::Value::Number(v.into())).unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<f64>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.and_then(|v| serde_json::Number::from_f64(v))
-                                .map(serde_json::Value::Number)
-                                .unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<bool>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null)
-                        );
-                    }
-                }
-            }
-            Ok(())
-        })?;
-
-        Ok(())
-    }
-
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
-        Ok(db.query::<ChangeRecord, _>("SELECT id, author_id, entity_type, entity_id, columns_json, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
+        Ok(db.query::<ChangeRecord, _>("SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
             .iter().map(|change| change.id.clone())
             .collect())
     }
@@ -332,7 +327,7 @@ impl SyncEngine {
         let mut change_ids = Vec::new();
         for file in files {
             if let Some(path) = file.strip_prefix(&prefix) {
-                if let Some(change_id) = path.strip_suffix(".json") {
+                if let Some(change_id) = path.strip_suffix(".msgpack") {
                     change_ids.push(change_id.to_string());
                 }
             }
@@ -346,34 +341,76 @@ impl SyncEngine {
         let results = db.query::<ChangeRecord, _>("SELECT * FROM ZV_CHANGE WHERE id = ?", (change_id,))?;
         results.into_iter().next().ok_or_else(|| anyhow!("not found"))
     }
-
-    fn get_remote_change(&self, change_id: &str) -> Result<ChangeRecord> {
-        let path = self.prefixed_path(&format!("changes/{}.json", change_id));
-        let data = self.storage.get(&path)?;
-        let change: ChangeRecord = serde_json::from_slice(&data)?;
-        Ok(change)
+    
+    fn get_local_change_as_remote(&self, db: &Db, change_id: &str) -> Result<RemoteChangeRecord> {
+        let change = self.get_local_change(db, change_id)?;
+        
+        // Get the field records
+        let field_records = db.query::<ChangeFieldRecord, _>(
+            "SELECT change_id, field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?", 
+            (change_id,)
+        )?;
+        
+        // Convert to remote format
+        let mut fields = Vec::new();
+        for field_record in field_records {
+            if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
+                fields.push(RemoteFieldRecord {
+                    field_name: field_record.field_name,
+                    field_value: msgpack_value,
+                });
+            }
+        }
+        
+        Ok(RemoteChangeRecord {
+            change,
+            fields,
+        })
     }
 
-    fn put_local_change(&self, db: &Db, change: &ChangeRecord) -> Result<()> {
+    fn get_remote_change(&self, change_id: &str) -> Result<RemoteChangeRecord> {
+        let path = self.prefixed_path(&format!("changes/{}.msgpack", change_id));
+        let data = self.storage.get(&path)?;
+        let remote_change: RemoteChangeRecord = rmp_serde::from_slice(&data)?;
+        Ok(remote_change)
+    }
+
+    fn put_local_change(&self, db: &Db, remote_change: &RemoteChangeRecord) -> Result<()> {
         db.transaction(|txn| {
+            let change = &remote_change.change;
+            
+            // Insert the change record
             txn.txn().execute(
-                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, columns_json, merged) 
-                 VALUES (?, ?, ?, ?, ?, false)",
+                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, merged) 
+                 VALUES (?, ?, ?, ?, false)",
                 rusqlite::params![
                     &change.id,
                     &change.author_id,
                     &change.entity_type,
                     &change.entity_id,
-                    &change.columns_json,
                 ]
             )?;
+            
+            // Insert the field records
+            for field in &remote_change.fields {
+                let field_bytes = rmp_serde::to_vec(&field.field_value)?;
+                txn.txn().execute(
+                    "INSERT OR IGNORE INTO ZV_CHANGE_FIELD (change_id, field_name, field_value) VALUES (?, ?, ?)",
+                    rusqlite::params![
+                        &change.id,
+                        &field.field_name,
+                        &field_bytes,
+                    ]
+                )?;
+            }
+            
             Ok(())
         })
     }
 
-    fn put_remote_change(&self, change: &ChangeRecord) -> Result<()> {
-        let path = self.prefixed_path(&format!("changes/{}.json", change.id));
-        let data = serde_json::to_vec_pretty(change)?;
+    fn put_remote_change(&self, remote_change: &RemoteChangeRecord) -> Result<()> {
+        let path = self.prefixed_path(&format!("changes/{}.msgpack", remote_change.change.id));
+        let data = rmp_serde::to_vec(remote_change)?;
         self.storage.put(&path, &data)?;
         Ok(())
     }
@@ -729,8 +766,8 @@ mod tests {
         )?;
         println!("Device B changes after sync:");
         for change in &changes_b {
-            println!("  Change {}: merged={}, columns={:?}", 
-                     change.id, change.merged, change.columns_json);
+            println!("  Change {}: merged={}", 
+                     change.id, change.merged);
         }
         
         // After another sync cycle, both should converge to "England" (the newest value)

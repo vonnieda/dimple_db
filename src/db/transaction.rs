@@ -1,5 +1,6 @@
-use anyhow::Result;
-use rusqlite::{Params, Transaction, params};
+use anyhow::{anyhow, Result};
+use rusqlite::{Params, ToSql, Transaction};
+use serde_rusqlite::NamedParamSlice;
 use uuid::Uuid;
 use std::cell::RefCell;
 
@@ -10,6 +11,8 @@ pub struct DbTransaction<'a> {
     txn: &'a Transaction<'a>,
     pending_events: RefCell<Vec<DbEvent>>,
 }
+
+pub type DbValue = NamedParamSlice;
 
 impl<'a> DbTransaction<'a> {
     pub(crate) fn new(db: &'a Db, txn: &'a Transaction<'a>) -> Self {
@@ -48,48 +51,20 @@ impl<'a> DbTransaction<'a> {
         self.save_internal(entity, false)
     }
     
-    /// Save a dynamic entity when we know the table name but not the type.
-    /// This is used by sync operations where we need to save entities without compile-time type information.
-    pub fn save_dynamic(&self, table_name: &str, entity_data: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
-        let column_names = self.db.table_column_names(self.txn, table_name)?;
-        
-        // Convert map to Value
-        let mut new_value = serde_json::Value::Object(entity_data.clone());
-        let id = self.ensure_entity_id(&mut new_value)?;
-        
-        // Check if entity exists
-        let check_sql = format!("SELECT COUNT(*) FROM {} WHERE id = ?", table_name);
-        let exists: bool = self.txn.query_row(&check_sql, params![&id], |row| {
-            row.get::<_, i64>(0).map(|count| count > 0)
-        })?;
-        
-        if exists {
-            self.update_entity(table_name, &column_names, &new_value)?;
-        } else {
-            self.insert_entity(table_name, &column_names, &new_value)?;
-        }
-        
-        // Queue event for notification after commit
-        let event = if exists {
-            DbEvent::Update(table_name.to_string(), id.clone())
-        } else {
-            DbEvent::Insert(table_name.to_string(), id.clone())
-        };
-        self.pending_events.borrow_mut().push(event);
-        
-        Ok(())
+    fn entity_to_value<E: Entity>(entity: &E, column_names: &[String]) -> Result<DbValue> {
+        let column_name_refs: Vec<&str> = column_names.iter().map(String::as_str).collect();
+        let params = serde_rusqlite::to_params_named_with_fields(entity, &column_name_refs)?;
+        Ok(params)
     }
 
     fn save_internal<E: Entity>(&self, entity: &E, track_changes: bool) -> Result<E> {
         let table_name = self.db.table_name_for_type::<E>()?;
         let column_names = self.db.table_column_names(self.txn, &table_name)?;
 
-        // Convert the entity to a JSON Value so we can manipulate it
-        // generically without needing more than Serialize.
-        let mut new_value = serde_json::to_value(entity)?;
-        let id = self.ensure_entity_id(&mut new_value)?;        
+        let mut new_value = Self::entity_to_value(entity, &column_names)?;
+        let id = self.ensure_entity_id(&mut new_value)?;
         let old_value = self.get::<E>(&id)?
-            .and_then(|e| serde_json::to_value(e).ok());
+            .and_then(|e| Self::entity_to_value(&e, &column_names).ok());
 
         let exists = old_value.is_some();
         
@@ -130,18 +105,38 @@ impl<'a> DbTransaction<'a> {
         Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
 
-    fn ensure_entity_id(&self, entity_value: &mut serde_json::Value) -> Result<String> {
-        match entity_value.get("id").and_then(|v| v.as_str()) {
-            Some(id) if !id.is_empty() => Ok(id.to_string()),
-            _ => {
-                let new_id = Uuid::now_v7().to_string();
-                entity_value["id"] = serde_json::Value::String(new_id.clone());
-                Ok(new_id)
+    fn ensure_entity_id(&self, entity_value: &mut DbValue) -> Result<String> {
+        for i in 0..entity_value.len() {
+            if entity_value[i].0 == ":id" {
+                let id = Self::extract_id(&entity_value[i].1);
+                return if id.clone().is_none_or(|id| id.is_empty()) {
+                    let id = Uuid::now_v7().to_string();
+                    entity_value[i].1 = Box::new(id.clone());
+                    Ok(id)
+                }
+                else {
+                    Ok(id.unwrap())
+                }
             }
         }
+        Err(anyhow!("no id column on entity"))
     }
-    
-    fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
+
+    fn extract_id(val: &Box<dyn ToSql>) -> Option<String> {
+        match val.to_sql() {
+            Ok(rusqlite::types::ToSqlOutput::Borrowed(value)) => match value {
+                rusqlite::types::ValueRef::Text(id) => Some(String::from_utf8(id.to_vec()).unwrap()),
+                _ => None,
+            },
+            Ok(rusqlite::types::ToSqlOutput::Owned(value)) => match value {
+                rusqlite::types::Value::Text(id) => Some(id.to_string()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &DbValue) -> Result<()> {
         let set_clause = column_names
             .iter()
             .filter(|col| *col != "id")
@@ -150,10 +145,11 @@ impl<'a> DbTransaction<'a> {
             .join(", ");
         
         let sql = format!("UPDATE {} SET {} WHERE id = :id", table_name, set_clause);
-        self.execute_with_named_params(&sql, entity_value, column_names)
+
+        self.execute_with_named_params(&sql, entity_value)
     }
     
-    fn insert_entity(&self, table_name: &str, column_names: &[String], entity_value: &serde_json::Value) -> Result<()> {
+    fn insert_entity(&self, table_name: &str, column_names: &[String], entity_value: &DbValue) -> Result<()> {
         let placeholders = column_names
             .iter()
             .map(|col| format!(":{}", col))
@@ -166,14 +162,12 @@ impl<'a> DbTransaction<'a> {
             column_names.join(", "),
             placeholders
         );
-        self.execute_with_named_params(&sql, entity_value, column_names)
+        self.execute_with_named_params(&sql, entity_value)
     }
     
-    fn execute_with_named_params(&self, sql: &str, entity_value: &serde_json::Value, column_names: &[String]) -> Result<()> {
+    fn execute_with_named_params(&self, sql: &str, entity_value: &DbValue) -> Result<()> {
         let mut stmt = self.txn.prepare(sql)?;
-        let str_refs: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
-        let params = serde_rusqlite::to_params_named_with_fields(entity_value, &str_refs)?;
-        stmt.execute(params.to_slice().as_slice())?;
+        stmt.execute(entity_value.to_slice().as_slice())?;
         Ok(())
     }
     

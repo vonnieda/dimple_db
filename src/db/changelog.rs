@@ -1,8 +1,10 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use uuid::Uuid;
+use std::collections::BTreeMap;
+use rmpv::Value as MsgPackValue;
 
-use crate::db::transaction::DbTransaction;
+use crate::db::transaction::{DbTransaction, DbValue};
 
 /// ZV is used as a prefix for the internal tables. Z puts them
 /// at the end of alphabetical lists and V differentiates them from
@@ -23,58 +25,135 @@ pub (crate) fn init_change_tracking_tables(conn: &Connection) -> Result<()> {
             author_id TEXT NOT NULL,
             entity_type TEXT NOT NULL,
             entity_id TEXT NOT NULL,
-            columns_json TEXT NOT NULL,
             merged BOOL NOT NULL DEFAULT FALSE
+        );
+
+        CREATE TABLE IF NOT EXISTS ZV_CHANGE_FIELD (
+            change_id TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            field_value BLOB NOT NULL,
+            PRIMARY KEY (change_id, field_name),
+            FOREIGN KEY (change_id) REFERENCES ZV_CHANGE(id)
         );
     ")?;
     Ok(())
 }
 
 pub (crate) fn track_changes(txn: &DbTransaction, table_name: &str, entity_id: &str, 
-        old_entity: Option<&serde_json::Value>, 
-        new_entity: &serde_json::Value,
+        old_entity: Option<&DbValue>, 
+        new_entity: &DbValue,
         column_names: &[String]) -> Result<()> {
     
     let author_id = txn.db().get_database_uuid()?;
     
     // Compute the diff between old and new entities
-    let columns_json_map = compute_entity_changes(old_entity, new_entity, column_names);
+    let field_changes = compute_entity_changes(old_entity, new_entity, column_names);
     
     // Only create a change record if there are actual changes
-    if !columns_json_map.is_empty() {
+    if !field_changes.is_empty() {
         let change_id = Uuid::now_v7().to_string();
         
-        // Convert map to JSON string
-        let columns_json_str = Some(serde_json::to_string(&columns_json_map)?);
-        
+        // Insert the change record
         txn.txn().execute(
-            "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, columns_json, merged) VALUES (?, ?, ?, ?, ?, true)",
+            "INSERT INTO ZV_CHANGE (id, author_id, entity_type, entity_id, merged) VALUES (?, ?, ?, ?, true)",
             rusqlite::params![
                 &change_id,
                 &author_id,
                 table_name,
                 entity_id,
-                columns_json_str,
             ]
         )?;
+        
+        // Insert individual field changes
+        for (field_name, msgpack_value) in field_changes {
+            let field_bytes = rmp_serde::to_vec(&msgpack_value)?;
+            txn.txn().execute(
+                "INSERT INTO ZV_CHANGE_FIELD (change_id, field_name, field_value) VALUES (?, ?, ?)",
+                rusqlite::params![
+                    &change_id,
+                    &field_name,
+                    &field_bytes,
+                ]
+            )?;
+        }
     }
     
     Ok(())
 }
 
+/// Convert DbValue to a map for easier access
+fn dbvalue_to_map(db_value: &DbValue) -> BTreeMap<String, rusqlite::types::Value> {
+    let mut map = BTreeMap::new();
+    for (name, value) in db_value.iter() {
+        // Remove the : prefix from parameter names
+        let clean_name = name.strip_prefix(':').unwrap_or(name);
+        if let Ok(sql_value) = value.to_sql() {
+            let val = match sql_value {
+                rusqlite::types::ToSqlOutput::Borrowed(val) => val.into(),
+                rusqlite::types::ToSqlOutput::Owned(val) => val,
+                _ => continue,
+            };
+            map.insert(clean_name.to_string(), val);
+        }
+    }
+    map
+}
+
+/// Convert a rusqlite::Value to a MessagePack Value
+fn sql_value_to_msgpack(value: &rusqlite::types::Value) -> MsgPackValue {
+    match value {
+        rusqlite::types::Value::Null => MsgPackValue::Nil,
+        rusqlite::types::Value::Integer(i) => MsgPackValue::Integer((*i).into()),
+        rusqlite::types::Value::Real(f) => MsgPackValue::F64(*f),
+        rusqlite::types::Value::Text(s) => MsgPackValue::String(s.clone().into()),
+        rusqlite::types::Value::Blob(b) => MsgPackValue::Binary(b.clone()),
+    }
+}
+
+/// Convert a MessagePack Value back to a rusqlite::Value
+pub fn msgpack_to_sql_value(value: &MsgPackValue) -> rusqlite::types::Value {
+    match value {
+        MsgPackValue::Nil => rusqlite::types::Value::Null,
+        MsgPackValue::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
+        MsgPackValue::Integer(i) => {
+            if let Some(i64_val) = i.as_i64() {
+                rusqlite::types::Value::Integer(i64_val)
+            } else if let Some(u64_val) = i.as_u64() {
+                rusqlite::types::Value::Integer(u64_val as i64)
+            } else {
+                rusqlite::types::Value::Null
+            }
+        },
+        MsgPackValue::F32(f) => rusqlite::types::Value::Real(*f as f64),
+        MsgPackValue::F64(f) => rusqlite::types::Value::Real(*f),
+        MsgPackValue::String(s) => {
+            if let Some(string) = s.as_str() {
+                rusqlite::types::Value::Text(string.to_string())
+            } else {
+                rusqlite::types::Value::Null
+            }
+        },
+        MsgPackValue::Binary(b) => rusqlite::types::Value::Blob(b.clone()),
+        _ => rusqlite::types::Value::Null, // Arrays, Maps, Extensions stored as binary
+    }
+}
+
 /// Compute the changes to track, returning only changed/new fields
-fn compute_entity_changes(old_entity: Option<&serde_json::Value>, 
-                          new_entity: &serde_json::Value,
-                          column_names: &[String]) -> serde_json::Map<String, serde_json::Value> {
-    let mut columns_json = serde_json::Map::new();
+fn compute_entity_changes(old_entity: Option<&DbValue>, 
+                          new_entity: &DbValue,
+                          column_names: &[String]) -> BTreeMap<String, MsgPackValue> {
+    let mut field_changes = BTreeMap::new();
+    
+    let old_map = old_entity.map(dbvalue_to_map);
+    let new_map = dbvalue_to_map(new_entity);
     
     for column_name in column_names {
         if column_name == "id" {
             continue;
         }
         
-        let old_value = old_entity.and_then(|e| e.get(column_name));
-        let new_value = new_entity.get(column_name);
+        let old_value = old_map.as_ref().and_then(|m| m.get(column_name));
+        let new_value = new_map.get(column_name);
         
         // Track all values on insert, only changes on update
         let is_insert = old_entity.is_none();
@@ -82,15 +161,16 @@ fn compute_entity_changes(old_entity: Option<&serde_json::Value>,
         
         if is_insert || values_differ {
             if let Some(new_val) = new_value {
-                columns_json.insert(column_name.clone(), new_val.clone());
+                let msgpack_val = sql_value_to_msgpack(new_val);
+                field_changes.insert(column_name.clone(), msgpack_val);
             } else {
                 // Handle null values
-                columns_json.insert(column_name.clone(), serde_json::Value::Null);
+                field_changes.insert(column_name.clone(), MsgPackValue::Nil);
             }
         }
     }
     
-    columns_json
+    field_changes
 }
 
 
@@ -99,8 +179,9 @@ mod tests {
     use anyhow::Result;
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
+    use rmpv::Value as MsgPackValue;
     
-    use crate::{Db, db::ChangeRecord};
+    use crate::{Db, db::{ChangeRecord, ChangeFieldRecord}};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default)]
     struct Artist {
@@ -120,10 +201,33 @@ mod tests {
 
     fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangeRecord>> {
         db.query(
-            "SELECT id, author_id, entity_type, entity_id, columns_json, merged 
+            "SELECT id, author_id, entity_type, entity_id, merged 
              FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",
             [entity_id]
         )
+    }
+    
+    fn get_change_fields(db: &Db, change_id: &str) -> Result<Vec<ChangeFieldRecord>> {
+        db.query(
+            "SELECT change_id, field_name, field_value 
+             FROM ZV_CHANGE_FIELD WHERE change_id = ? ORDER BY field_name",
+            [change_id]
+        )
+    }
+    
+    fn get_field_value_as_string(field_record: &ChangeFieldRecord) -> String {
+        if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
+            let sql_value = super::msgpack_to_sql_value(&msgpack_value);
+            match sql_value {
+                rusqlite::types::Value::Text(s) => s,
+                rusqlite::types::Value::Integer(i) => i.to_string(),
+                rusqlite::types::Value::Real(f) => f.to_string(),
+                rusqlite::types::Value::Null => "null".to_string(),
+                rusqlite::types::Value::Blob(_) => "<blob>".to_string(),
+            }
+        } else {
+            "<invalid>".to_string()
+        }
     }
 
     #[test]
@@ -133,11 +237,13 @@ mod tests {
         
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1); // One change record for the entity
-        assert!(changes[0].columns_json.is_some());
         
-        // Check that columns_json contains the name
-        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
-        assert_eq!(columns["name"], "Radiohead");
+        // Check that change fields contain the name
+        let fields = get_change_fields(&db, &changes[0].id)?;
+        assert!(!fields.is_empty());
+        
+        let name_field = fields.iter().find(|f| f.field_name == "name").unwrap();
+        assert_eq!(get_field_value_as_string(name_field), "Radiohead");
         Ok(())
     }
 
@@ -156,9 +262,12 @@ mod tests {
         assert_eq!(changes.len(), 2); // insert + update
         
         // Check the update change only contains the modified field
-        let update_columns: serde_json::Value = serde_json::from_str(&changes[1].columns_json.as_ref().unwrap())?;
-        assert_eq!(update_columns["summary"], "Rock band");
-        assert!(update_columns.get("name").is_none()); // name wasn't changed
+        let update_fields = get_change_fields(&db, &changes[1].id)?;
+        assert_eq!(update_fields.len(), 1); // Only summary should have changed
+        
+        let summary_field = &update_fields[0];
+        assert_eq!(summary_field.field_name, "summary");
+        assert_eq!(get_field_value_as_string(summary_field), "Rock band");
         Ok(())
     }
 
@@ -188,14 +297,17 @@ mod tests {
         
         let changes = get_changes(&db, &artist.id)?;
         assert_eq!(changes.len(), 1);
-        assert!(changes[0].columns_json.is_some());
         
-        // Parse the columns_json to check it includes the null field
-        let columns: serde_json::Value = serde_json::from_str(&changes[0].columns_json.as_ref().unwrap())?;
-        assert_eq!(columns["name"], "Test Artist");
+        // Parse the change fields to check it includes the null field
+        let fields = get_change_fields(&db, &changes[0].id)?;
+        
+        let name_field = fields.iter().find(|f| f.field_name == "name").unwrap();
+        assert_eq!(get_field_value_as_string(name_field), "Test Artist");
+        
         // The key point: summary should be present as null, not missing
-        assert!(columns.get("summary").is_some(), "summary field should be present");
-        assert!(columns["summary"].is_null(), "summary field should be null");
+        let summary_field = fields.iter().find(|f| f.field_name == "summary");
+        assert!(summary_field.is_some(), "summary field should be present");
+        assert_eq!(get_field_value_as_string(summary_field.unwrap()), "null", "summary field should be null");
         
         Ok(())
     }
@@ -223,10 +335,11 @@ mod tests {
         
         // Check the update change
         let update_change = &changes[1];
-        let columns: serde_json::Value = serde_json::from_str(&update_change.columns_json.as_ref().unwrap())?;
+        let update_fields = get_change_fields(&db, &update_change.id)?;
         
         // Should track the change to "Now has a summary"
-        assert_eq!(columns["summary"], "Now has a summary");
+        let summary_field = update_fields.iter().find(|f| f.field_name == "summary").unwrap();
+        assert_eq!(get_field_value_as_string(summary_field), "Now has a summary");
         
         Ok(())
     }
