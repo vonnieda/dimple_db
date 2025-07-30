@@ -6,6 +6,38 @@ use rusqlite::OptionalExtension;
 
 use crate::{db::{ChangeRecord, Db, transaction::DbTransaction}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
 
+fn json_value_to_sql_value(json_val: &serde_json::Value) -> rusqlite::types::Value {
+    match json_val {
+        serde_json::Value::Null => rusqlite::types::Value::Null,
+        serde_json::Value::Bool(b) => rusqlite::types::Value::Integer(*b as i64),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                rusqlite::types::Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                rusqlite::types::Value::Real(f)
+            } else {
+                rusqlite::types::Value::Null
+            }
+        },
+        serde_json::Value::String(s) => rusqlite::types::Value::Text(s.clone()),
+        serde_json::Value::Object(obj) => {
+            // Check if this is a blob representation
+            if let (Some(serde_json::Value::String(type_val)), Some(serde_json::Value::String(data))) = 
+                (obj.get("__type"), obj.get("data")) {
+                if type_val == "blob" {
+                    // Decode base64 back to blob
+                    if let Ok(decoded) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
+                        return rusqlite::types::Value::Blob(decoded);
+                    }
+                }
+            }
+            // Otherwise, store as JSON string
+            rusqlite::types::Value::Text(json_val.to_string())
+        },
+        serde_json::Value::Array(_) => rusqlite::types::Value::Text(json_val.to_string()),
+    }
+}
+
 #[derive(Debug)]
 struct AttributeChange {
     change_id: String,
@@ -210,15 +242,14 @@ impl SyncEngine {
     }
 
     fn apply_entity_updates(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, changes: Vec<AttributeChange>) -> Result<()> {
-        // Start with entity ID
-        let mut entity_json = serde_json::Map::new();
-        entity_json.insert("id".to_string(), serde_json::Value::String(entity_id.to_string()));
-
-        // Read existing entity if it exists
-        if self.entity_exists(txn, entity_type, entity_id)? {
-            self.read_existing_entity(txn, entity_type, entity_id, &mut entity_json)?;
-        }
-
+        let exists = self.entity_exists(txn, entity_type, entity_id)?;
+        
+        // Get table columns
+        let column_names = txn.db().table_column_names(txn.txn(), entity_type)?;
+        
+        // Build a map of column -> value for the changes we need to apply
+        let mut updates: HashMap<String, serde_json::Value> = HashMap::new();
+        
         // Apply only changes that are actually the latest for each attribute
         for change in changes {
             // Query the changelog to find the latest change for this attribute
@@ -239,17 +270,62 @@ impl SyncEngine {
             // Only apply this change if it's the latest one for this attribute
             if let Some(latest_id) = latest_change_id {
                 if latest_id == change.change_id {
-                    entity_json.insert(change.attribute, change.new_value);
+                    updates.insert(change.attribute, change.new_value);
                 }
             } else {
                 // No existing change for this attribute, so apply it
-                entity_json.insert(change.attribute, change.new_value);
+                updates.insert(change.attribute, change.new_value);
             }
         }
-
-        // Save the updated entity
-        // TODO working on save_internal to handle this case and remove dupe code
-        // txn.save_dynamic(entity_type, &entity_json)?;
+        
+        if updates.is_empty() {
+            return Ok(());
+        }
+        
+        if exists {
+            // Build UPDATE statement
+            let set_clauses: Vec<String> = updates.keys()
+                .filter(|col| column_names.contains(col))
+                .map(|col| format!("{} = ?", col))
+                .collect();
+            
+            if set_clauses.is_empty() {
+                return Ok(());
+            }
+            
+            let sql = format!("UPDATE {} SET {} WHERE id = ?", entity_type, set_clauses.join(", "));
+            
+            // Build parameters
+            let mut params: Vec<rusqlite::types::Value> = updates.iter()
+                .filter(|(col, _)| column_names.contains(col))
+                .map(|(_, val)| json_value_to_sql_value(val))
+                .collect();
+            params.push(rusqlite::types::Value::Text(entity_id.to_string()));
+            
+            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+        } else {
+            // Build INSERT statement
+            let mut insert_columns = vec!["id"];
+            let mut placeholders = vec!["?"];
+            let mut params = vec![rusqlite::types::Value::Text(entity_id.to_string())];
+            
+            for col in &column_names {
+                if col != "id" && updates.contains_key(col) {
+                    insert_columns.push(col);
+                    placeholders.push("?");
+                    params.push(json_value_to_sql_value(updates.get(col).unwrap()));
+                }
+            }
+            
+            let sql = format!(
+                "INSERT INTO {} ({}) VALUES ({})", 
+                entity_type, 
+                insert_columns.join(", "),
+                placeholders.join(", ")
+            );
+            
+            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+        }
 
         Ok(())
     }
@@ -260,51 +336,6 @@ impl SyncEngine {
             rusqlite::params![entity_id],
             |_| Ok(())
         ).is_ok())
-    }
-
-    fn read_existing_entity(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, entity_json: &mut serde_json::Map<String, serde_json::Value>) -> Result<()> {
-        let query = format!("SELECT * FROM {} WHERE id = ?", entity_type);
-        let mut stmt = txn.txn().prepare(&query)?;
-        
-        let column_names: Vec<String> = stmt.column_names()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // TODO smells
-        stmt.query_row(rusqlite::params![entity_id], |row| {
-            for (idx, column_name) in column_names.iter().enumerate() {
-                if column_name != "id" {
-                    // Try to get value as different types
-                    if let Ok(val) = row.get::<_, Option<String>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<i64>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(|v| serde_json::Value::Number(v.into())).unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<f64>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.and_then(|v| serde_json::Number::from_f64(v))
-                                .map(serde_json::Value::Number)
-                                .unwrap_or(serde_json::Value::Null)
-                        );
-                    } else if let Ok(val) = row.get::<_, Option<bool>>(idx) {
-                        entity_json.insert(
-                            column_name.clone(),
-                            val.map(serde_json::Value::Bool).unwrap_or(serde_json::Value::Null)
-                        );
-                    }
-                }
-            }
-            Ok(())
-        })?;
-
-        Ok(())
     }
 
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
