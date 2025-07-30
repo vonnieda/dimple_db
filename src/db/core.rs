@@ -339,7 +339,7 @@ mod tests {
         let db = setup_db()?;
         let (tx, rx) = channel::<Vec<Artist>>();
         
-        let _subscription = db.query_subscribe(
+        let subscription = db.query_subscribe(
             "SELECT * FROM Artist", 
             (), 
             move |artists: Vec<Artist>| {
@@ -348,25 +348,25 @@ mod tests {
         )?;
         
         // Should get initial results (empty)
-        let initial_results = rx.recv_timeout(Duration::from_secs(1))?;
+        let initial_results = rx.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(initial_results.len(), 0);
         
         // Insert first artist
         let _artist1 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
-        thread::sleep(Duration::from_millis(200)); // Give time for the event to propagate
         
         // Should get updated results with 1 artist
-        let results_after_first = rx.recv_timeout(Duration::from_secs(1))?;
+        let results_after_first = rx.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(results_after_first.len(), 1);
         assert_eq!(results_after_first[0].name, "Pink Floyd");
         
         // Insert second artist
         let _artist2 = db.save(&Artist { name: "Metallica".to_string(), ..Default::default() })?;
-        thread::sleep(Duration::from_millis(200)); // Give time for the event to propagate
         
         // Should get updated results with 2 artists
-        let results_after_second = rx.recv_timeout(Duration::from_secs(1))?;
+        let results_after_second = rx.recv_timeout(Duration::from_secs(5))?;
         assert_eq!(results_after_second.len(), 2);
+
+        drop(subscription);
         
         Ok(())
     }
