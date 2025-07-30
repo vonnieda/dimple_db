@@ -75,38 +75,25 @@ impl SyncEngine {
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::debug!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
-        // Parallel version
         missing_remote_change_ids.par_iter().for_each(|remote_change_id| {
             if let Ok(mut change) = self.get_remote_change(remote_change_id) {
                 change.merged = false;
-                // TODO error
+                // TODO handle error
                 let _ = self.put_local_change(db, &change);
             }
         });
-        // Serial version
-        // for remote_change_id in missing_remote_change_ids {
-        //     let mut change = self.get_remote_change(remote_change_id)?;
-        //     change.merged = false;
-        //     self.put_local_change(db, &change)?;
-        // }
 
         // 3. For any local change_id not in the remote set, upload it.
         let missing_local_change_ids = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::debug!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
-        // Parallel version
         missing_local_change_ids.par_iter().for_each(|local_change_id| {
             if let Ok(change) = self.get_local_change(db, local_change_id) {
-                // TODO error
+                // TODO handle error
                 let _ = self.put_remote_change(&change);
             }
         });
-        // Serial version
-        // for local_change_id in missing_local_change_ids {
-        //     let change = self.get_local_change(db, local_change_id)?;
-        //     self.put_remote_change(&change)?;
-        // }
 
         // 4-8. Process unmerged changes.
         let result = self.merge_unmerged_changes(db);
@@ -261,7 +248,8 @@ impl SyncEngine {
         }
 
         // Save the updated entity
-        txn.save_dynamic(entity_type, &entity_json)?;
+        // TODO working on save_internal to handle this case and remove dupe code
+        // txn.save_dynamic(entity_type, &entity_json)?;
 
         Ok(())
     }

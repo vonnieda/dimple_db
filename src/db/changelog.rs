@@ -1,8 +1,10 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use uuid::Uuid;
+use std::collections::BTreeMap;
+use base64::Engine;
 
-use crate::db::transaction::DbTransaction;
+use crate::db::transaction::{DbTransaction, DbValue};
 
 /// ZV is used as a prefix for the internal tables. Z puts them
 /// at the end of alphabetical lists and V differentiates them from
@@ -31,8 +33,8 @@ pub (crate) fn init_change_tracking_tables(conn: &Connection) -> Result<()> {
 }
 
 pub (crate) fn track_changes(txn: &DbTransaction, table_name: &str, entity_id: &str, 
-        old_entity: Option<&serde_json::Value>, 
-        new_entity: &serde_json::Value,
+        old_entity: Option<&DbValue>, 
+        new_entity: &DbValue,
         column_names: &[String]) -> Result<()> {
     
     let author_id = txn.db().get_database_uuid()?;
@@ -62,19 +64,40 @@ pub (crate) fn track_changes(txn: &DbTransaction, table_name: &str, entity_id: &
     Ok(())
 }
 
+/// Convert DbValue to a map for easier access
+fn dbvalue_to_map(db_value: &DbValue) -> BTreeMap<String, rusqlite::types::Value> {
+    let mut map = BTreeMap::new();
+    for (name, value) in db_value.iter() {
+        // Remove the : prefix from parameter names
+        let clean_name = name.strip_prefix(':').unwrap_or(name);
+        if let Ok(sql_value) = value.to_sql() {
+            let val = match sql_value {
+                rusqlite::types::ToSqlOutput::Borrowed(val) => val.into(),
+                rusqlite::types::ToSqlOutput::Owned(val) => val,
+                _ => continue,
+            };
+            map.insert(clean_name.to_string(), val);
+        }
+    }
+    map
+}
+
 /// Compute the changes to track, returning only changed/new fields
-fn compute_entity_changes(old_entity: Option<&serde_json::Value>, 
-                          new_entity: &serde_json::Value,
+fn compute_entity_changes(old_entity: Option<&DbValue>, 
+                          new_entity: &DbValue,
                           column_names: &[String]) -> serde_json::Map<String, serde_json::Value> {
     let mut columns_json = serde_json::Map::new();
+    
+    let old_map = old_entity.map(dbvalue_to_map);
+    let new_map = dbvalue_to_map(new_entity);
     
     for column_name in column_names {
         if column_name == "id" {
             continue;
         }
         
-        let old_value = old_entity.and_then(|e| e.get(column_name));
-        let new_value = new_entity.get(column_name);
+        let old_value = old_map.as_ref().and_then(|m| m.get(column_name));
+        let new_value = new_map.get(column_name);
         
         // Track all values on insert, only changes on update
         let is_insert = old_entity.is_none();
@@ -82,7 +105,24 @@ fn compute_entity_changes(old_entity: Option<&serde_json::Value>,
         
         if is_insert || values_differ {
             if let Some(new_val) = new_value {
-                columns_json.insert(column_name.clone(), new_val.clone());
+                // Convert rusqlite::Value to serde_json::Value
+                let json_val = match new_val {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(i) => serde_json::json!(i),
+                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                    rusqlite::types::Value::Text(s) => serde_json::json!(s),
+                    rusqlite::types::Value::Blob(b) => {
+                        // For blobs, we'll store them as base64-encoded strings
+                        // TODO checking this in for now, but going to need to change the
+                        // JSON to cbor or something. Don't wanna blow up blobs.
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(b);
+                        serde_json::json!({
+                            "__type": "blob",
+                            "data": encoded
+                        })
+                    }
+                };
+                columns_json.insert(column_name.clone(), json_val);
             } else {
                 // Handle null values
                 columns_json.insert(column_name.clone(), serde_json::Value::Null);

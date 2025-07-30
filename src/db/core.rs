@@ -255,11 +255,6 @@ mod tests {
         Ok(())
     }
 
-    // Change Tracking moved to changelog.rs
-
-
-
-
     // Schema Handling
     #[test]
     fn extra_struct_fields_ignored() -> Result<()> {
@@ -338,8 +333,6 @@ mod tests {
         }
         Ok(())
     }
-
-    // Change Log Query Interface tests moved to changelog.rs
 
     #[test]
     fn query_subscribe() -> Result<()> {
@@ -516,14 +509,10 @@ mod tests {
         db.migrate(&migrations)?;
         
         let test_blob = db.save(&TestBlob {
-            blob_data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a].to_vec(),
+            blob_data: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08].to_vec(),
             ..Default::default()
         })?;
         assert!(test_blob.blob_data.len() == 8);
-
-        // Fails with: Error: Serialization is not supported from type: u64
-        // Okay, so actually the problem is in serde_json::Value not having a
-        // native type for an array of bytes. It converts them to u64.
 
         Ok(())
     }
