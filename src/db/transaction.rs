@@ -106,34 +106,29 @@ impl<'a> DbTransaction<'a> {
     }
 
     fn ensure_entity_id(&self, entity_value: &mut DbValue) -> Result<String> {
-        for i in 0..entity_value.len() {
-            if entity_value[i].0 == ":id" {
-                let id = Self::extract_id(&entity_value[i].1);
-                return if id.clone().is_none_or(|id| id.is_empty()) {
-                    let id = Uuid::now_v7().to_string();
-                    entity_value[i].1 = Box::new(id.clone());
-                    Ok(id)
-                }
-                else {
-                    Ok(id.unwrap())
-                }
+        let id_param = entity_value.iter_mut()
+            .find(|(name, _)| name == &":id")
+            .ok_or_else(|| anyhow!("no id column on entity"))?;
+        
+        match Self::extract_id(&id_param.1).filter(|s| !s.is_empty()) {
+            Some(id) => Ok(id),
+            None => {
+                let id = Uuid::now_v7().to_string();
+                id_param.1 = Box::new(id.clone());
+                Ok(id)
             }
         }
-        Err(anyhow!("no id column on entity"))
     }
 
     fn extract_id(val: &Box<dyn ToSql>) -> Option<String> {
-        match val.to_sql() {
-            Ok(rusqlite::types::ToSqlOutput::Borrowed(value)) => match value {
-                rusqlite::types::ValueRef::Text(id) => Some(String::from_utf8(id.to_vec()).unwrap()),
-                _ => None,
-            },
-            Ok(rusqlite::types::ToSqlOutput::Owned(value)) => match value {
-                rusqlite::types::Value::Text(id) => Some(id.to_string()),
-                _ => None,
-            },
+        use rusqlite::types::{ToSqlOutput, Value, ValueRef};
+        
+        val.to_sql().ok().and_then(|output| match output {
+            ToSqlOutput::Borrowed(ValueRef::Text(bytes)) => 
+                String::from_utf8(bytes.to_vec()).ok(),
+            ToSqlOutput::Owned(Value::Text(s)) => Some(s),
             _ => None,
-        }
+        })
     }
 
     fn update_entity(&self, table_name: &str, column_names: &[String], entity_value: &DbValue) -> Result<()> {
