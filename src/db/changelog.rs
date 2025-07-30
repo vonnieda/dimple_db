@@ -31,7 +31,7 @@ pub (crate) fn init_change_tracking_tables(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS ZV_CHANGE_FIELD (
             change_id TEXT NOT NULL,
             field_name TEXT NOT NULL,
-            field_value BLOB NOT NULL,
+            field_value ANY,
             PRIMARY KEY (change_id, field_name),
             FOREIGN KEY (change_id) REFERENCES ZV_CHANGE(id)
         );
@@ -65,14 +65,13 @@ pub (crate) fn track_changes(txn: &DbTransaction, table_name: &str, entity_id: &
         )?;
         
         // Insert individual field changes
-        for (field_name, msgpack_value) in field_changes {
-            let field_bytes = rmp_serde::to_vec(&msgpack_value)?;
+        for (field_name, sql_value) in field_changes {
             txn.txn().execute(
                 "INSERT INTO ZV_CHANGE_FIELD (change_id, field_name, field_value) VALUES (?, ?, ?)",
                 rusqlite::params![
                     &change_id,
                     &field_name,
-                    &field_bytes,
+                    &sql_value,
                 ]
             )?;
         }
@@ -100,7 +99,7 @@ fn dbvalue_to_map(db_value: &DbValue) -> BTreeMap<String, rusqlite::types::Value
 }
 
 /// Convert a rusqlite::Value to a MessagePack Value
-fn sql_value_to_msgpack(value: &rusqlite::types::Value) -> MsgPackValue {
+pub fn sql_value_to_msgpack(value: &rusqlite::types::Value) -> MsgPackValue {
     match value {
         rusqlite::types::Value::Null => MsgPackValue::Nil,
         rusqlite::types::Value::Integer(i) => MsgPackValue::Integer((*i).into()),
@@ -134,14 +133,14 @@ pub fn msgpack_to_sql_value(value: &MsgPackValue) -> rusqlite::types::Value {
             }
         },
         MsgPackValue::Binary(b) => rusqlite::types::Value::Blob(b.clone()),
-        _ => rusqlite::types::Value::Null, // Arrays, Maps, Extensions stored as binary
+        _ => rusqlite::types::Value::Null,
     }
 }
 
 /// Compute the changes to track, returning only changed/new fields
 fn compute_entity_changes(old_entity: Option<&DbValue>, 
                           new_entity: &DbValue,
-                          column_names: &[String]) -> BTreeMap<String, MsgPackValue> {
+                          column_names: &[String]) -> BTreeMap<String, rusqlite::types::Value> {
     let mut field_changes = BTreeMap::new();
     
     let old_map = old_entity.map(dbvalue_to_map);
@@ -161,11 +160,10 @@ fn compute_entity_changes(old_entity: Option<&DbValue>,
         
         if is_insert || values_differ {
             if let Some(new_val) = new_value {
-                let msgpack_val = sql_value_to_msgpack(new_val);
-                field_changes.insert(column_name.clone(), msgpack_val);
+                field_changes.insert(column_name.clone(), new_val.clone());
             } else {
                 // Handle null values
-                field_changes.insert(column_name.clone(), MsgPackValue::Nil);
+                field_changes.insert(column_name.clone(), rusqlite::types::Value::Null);
             }
         }
     }
@@ -179,9 +177,7 @@ mod tests {
     use anyhow::Result;
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use rmpv::Value as MsgPackValue;
-    
-    use crate::{Db, db::{ChangeRecord, ChangeFieldRecord}};
+    use crate::{Db, db::ChangeRecord};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default)]
     struct Artist {
@@ -207,26 +203,36 @@ mod tests {
         )
     }
     
-    fn get_change_fields(db: &Db, change_id: &str) -> Result<Vec<ChangeFieldRecord>> {
-        db.query(
-            "SELECT change_id, field_name, field_value 
-             FROM ZV_CHANGE_FIELD WHERE change_id = ? ORDER BY field_name",
-            [change_id]
-        )
+    struct TestFieldRecord {
+        field_name: String,
+        field_value: rusqlite::types::Value,
     }
     
-    fn get_field_value_as_string(field_record: &ChangeFieldRecord) -> String {
-        if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
-            let sql_value = super::msgpack_to_sql_value(&msgpack_value);
-            match sql_value {
-                rusqlite::types::Value::Text(s) => s,
-                rusqlite::types::Value::Integer(i) => i.to_string(),
-                rusqlite::types::Value::Real(f) => f.to_string(),
-                rusqlite::types::Value::Null => "null".to_string(),
-                rusqlite::types::Value::Blob(_) => "<blob>".to_string(),
+    fn get_change_fields(db: &Db, change_id: &str) -> Result<Vec<TestFieldRecord>> {
+        db.transaction(|txn| {
+            let mut stmt = txn.txn().prepare(
+                "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ? ORDER BY field_name"
+            )?;
+            let mut rows = stmt.query([change_id])?;
+            
+            let mut fields = Vec::new();
+            while let Some(row) = rows.next()? {
+                fields.push(TestFieldRecord {
+                    field_name: row.get(0)?,
+                    field_value: row.get(1)?,
+                });
             }
-        } else {
-            "<invalid>".to_string()
+            Ok(fields)
+        })
+    }
+    
+    fn get_field_value_as_string(field_record: &TestFieldRecord) -> String {
+        match &field_record.field_value {
+            rusqlite::types::Value::Text(s) => s.clone(),
+            rusqlite::types::Value::Integer(i) => i.to_string(),
+            rusqlite::types::Value::Real(f) => f.to_string(),
+            rusqlite::types::Value::Null => "null".to_string(),
+            rusqlite::types::Value::Blob(_) => "<blob>".to_string(),
         }
     }
 

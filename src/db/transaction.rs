@@ -169,4 +169,8 @@ impl<'a> DbTransaction<'a> {
     pub(crate) fn take_pending_events(&self) -> Vec<DbEvent> {
         std::mem::take(&mut *self.pending_events.borrow_mut())
     }
+    
+    pub(crate) fn add_pending_event(&self, event: DbEvent) {
+        self.pending_events.borrow_mut().push(event);
+    }
 }

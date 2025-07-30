@@ -3,11 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, Result};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rusqlite::OptionalExtension;
-use rmpv::Value as MsgPackValue;
 
-use crate::{db::{ChangeRecord, ChangeFieldRecord, RemoteChangeRecord, RemoteFieldRecord, Db, transaction::DbTransaction, changelog::msgpack_to_sql_value}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
-
-// Helper function is no longer needed since we're working directly with rusqlite::types::Value
+use crate::{db::{ChangeRecord, RemoteChangeRecord, RemoteFieldRecord, Db, transaction::DbTransaction, changelog::{sql_value_to_msgpack, msgpack_to_sql_value}, DbEvent}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
 
 #[derive(Debug)]
 struct AttributeChange {
@@ -158,23 +155,22 @@ impl SyncEngine {
         let mut attribute_changes = Vec::new();
 
         for change in unmerged_changes {
-            // Query the field changes for this change record
-            let field_records = txn.query::<ChangeFieldRecord, _>(
-                "SELECT change_id, field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?",
-                [&change.id]
+            let mut stmt = txn.txn().prepare(
+                "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
             )?;
+            let mut rows = stmt.query([&change.id])?;
             
-            for field_record in field_records {
-                if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
-                    let value = msgpack_to_sql_value(&msgpack_value);
-                    attribute_changes.push(AttributeChange {
-                        change_id: change.id.clone(),
-                        entity_type: change.entity_type.clone(),
-                        entity_id: change.entity_id.clone(),
-                        attribute: field_record.field_name,
-                        new_value: value,
-                    });
-                }
+            while let Some(row) = rows.next()? {
+                let field_name: String = row.get(0)?;
+                let value = row.get_ref(1)?.into();
+                
+                attribute_changes.push(AttributeChange {
+                    change_id: change.id.clone(),
+                    entity_type: change.entity_type.clone(),
+                    entity_id: change.entity_id.clone(),
+                    attribute: field_name,
+                    new_value: value,
+                });
             }
         }
 
@@ -279,6 +275,9 @@ impl SyncEngine {
             params.push(rusqlite::types::Value::Text(entity_id.to_string()));
             
             txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+            
+            // Queue update event for notification
+            txn.add_pending_event(DbEvent::Update(entity_type.to_string(), entity_id.to_string()));
         } else {
             // Build INSERT statement
             let mut insert_columns = vec!["id"];
@@ -301,6 +300,9 @@ impl SyncEngine {
             );
             
             txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
+            
+            // Queue insert event for notification
+            txn.add_pending_event(DbEvent::Insert(entity_type.to_string(), entity_id.to_string()));
         }
 
         Ok(())
@@ -345,22 +347,25 @@ impl SyncEngine {
     fn get_local_change_as_remote(&self, db: &Db, change_id: &str) -> Result<RemoteChangeRecord> {
         let change = self.get_local_change(db, change_id)?;
         
-        // Get the field records
-        let field_records = db.query::<ChangeFieldRecord, _>(
-            "SELECT change_id, field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?", 
-            (change_id,)
-        )?;
-        
-        // Convert to remote format
-        let mut fields = Vec::new();
-        for field_record in field_records {
-            if let Ok(msgpack_value) = rmp_serde::from_slice::<MsgPackValue>(&field_record.field_value) {
+        let fields = db.transaction(|txn| {
+            let mut stmt = txn.txn().prepare(
+                "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
+            )?;
+            let mut rows = stmt.query([change_id])?;
+            
+            // Convert to remote format
+            let mut fields = Vec::new();
+            while let Some(row) = rows.next()? {
+                let field_name: String = row.get(0)?;
+                let sql_value: rusqlite::types::Value = row.get_ref(1)?.into();
+                
                 fields.push(RemoteFieldRecord {
-                    field_name: field_record.field_name,
-                    field_value: msgpack_value,
+                    field_name,
+                    field_value: sql_value_to_msgpack(&sql_value),
                 });
             }
-        }
+            Ok(fields)
+        })?;
         
         Ok(RemoteChangeRecord {
             change,
@@ -391,15 +396,15 @@ impl SyncEngine {
                 ]
             )?;
             
-            // Insert the field records
+            // Insert the field records - convert from MessagePack to SQL values
             for field in &remote_change.fields {
-                let field_bytes = rmp_serde::to_vec(&field.field_value)?;
+                let sql_value = msgpack_to_sql_value(&field.field_value);
                 txn.txn().execute(
                     "INSERT OR IGNORE INTO ZV_CHANGE_FIELD (change_id, field_name, field_value) VALUES (?, ?, ?)",
                     rusqlite::params![
                         &change.id,
                         &field.field_name,
-                        &field_bytes,
+                        &sql_value,
                     ]
                 )?;
             }
@@ -471,7 +476,7 @@ impl SyncEngineBuilder {
 mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{Db, sync::SyncEngine, db::ChangeRecord};
+    use crate::{Db, sync::SyncEngine, db::{ChangeRecord, DbEvent}};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
     struct Artist {
@@ -894,6 +899,73 @@ mod tests {
         assert_eq!(albums.len(), 1);
         assert_eq!(albums[0].title, "Abbey Road");
         assert_eq!(albums[0].artist_id, artist.id);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_triggers_notifications() -> anyhow::Result<()> {
+        use std::time::Duration;
+        
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        let sync_engine = SyncEngine::builder()
+            .in_memory()
+            .build()?;
+        
+        // Create an artist in db1
+        let artist = db1.save(&Artist {
+            name: "Pink Floyd".to_string(),
+            country: Some("UK".to_string()),
+            ..Default::default()
+        })?;
+        
+        // Sync db1 to storage
+        sync_engine.sync(&db1)?;
+        
+        // Subscribe to notifications on db2
+        let receiver = db2.subscribe();
+        
+        // Sync db2 from storage - this should trigger a notification
+        sync_engine.sync(&db2)?;
+        
+        // Check that we received an insert notification
+        let event = receiver.recv_timeout(Duration::from_secs(1))?;
+        match event {
+            DbEvent::Insert(entity_type, entity_id) => {
+                assert_eq!(entity_type, "Artist");
+                assert_eq!(entity_id, artist.id);
+            }
+            _ => panic!("Expected Insert event, got {:?}", event),
+        }
+        
+        // Now update the artist in db1
+        let mut updated_artist = artist.clone();
+        updated_artist.country = Some("United Kingdom".to_string());
+        db1.save(&updated_artist)?;
+        
+        // Sync changes
+        sync_engine.sync(&db1)?;
+        
+        // Sync db2 again - should get an update notification
+        sync_engine.sync(&db2)?;
+        
+        // Check for update notification
+        let event = receiver.recv_timeout(Duration::from_secs(1))?;
+        match event {
+            DbEvent::Update(entity_type, entity_id) => {
+                assert_eq!(entity_type, "Artist");
+                assert_eq!(entity_id, artist.id);
+            }
+            _ => panic!("Expected Update event, got {:?}", event),
+        }
         
         Ok(())
     }
