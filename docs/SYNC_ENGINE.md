@@ -20,8 +20,10 @@ be handled at the user level with tombstones.
 
 Each replica stores one or more change files in the storage.
 
-Each change file contains one record from the ZV_CHANGE table, representing
-one or more column updates to an entity.
+Each change file contains a `RemoteChangeRecord` which combines:
+- One record from the ZV_CHANGE table (change metadata)
+- Associated records from ZV_CHANGE_FIELD table (individual field changes)
+
 
 ## Directory Structure
 
@@ -30,7 +32,7 @@ s3://endpoint/bucket/base_path/ or
 file://base_path or
 memory://base_path
 └── changes/
-	└── {change_uuid}.json
+	└── {change_uuid}.msgpack
 ```
 
 
@@ -38,7 +40,7 @@ memory://base_path
 
 These tables are automatically created and maintained alongside the entity tables and are used to store the change log and sync metadata.
 
-```
+```sql
 CREATE TABLE IF NOT EXISTS ZV_METADATA (
 	key TEXT NOT NULL PRIMARY KEY,
 	value TEXT NOT NULL
@@ -52,7 +54,15 @@ CREATE TABLE IF NOT EXISTS ZV_CHANGE (
 	author_id TEXT NOT NULL,
 	entity_type TEXT NOT NULL,
 	entity_id TEXT NOT NULL,
-	columns_json TEXT NOT NULL
+	merged BOOL NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS ZV_CHANGE_FIELD (
+	change_id TEXT NOT NULL,
+	field_name TEXT NOT NULL,
+	field_value BLOB NOT NULL,
+	PRIMARY KEY (change_id, field_name),
+	FOREIGN KEY (change_id) REFERENCES ZV_CHANGE(id)
 );
 ```
 
@@ -60,14 +70,31 @@ CREATE TABLE IF NOT EXISTS ZV_CHANGE (
 
 ### Change File Format
 
-Stored in `changes/{change_file_uuid}.json`:
+Stored in `changes/{change_uuid}.msgpack` using MessagePack binary format:
+
+**Example logical structure** (represented as JSON for readability):
 ```json
 {
-  "id": "01982f1e-dedc-7863-941c-fa5584b872c1",
-  "author_id": "01982f1e-dedb-75a2-98d9-088958068486",
-  "entity_type": "AlbumArtist",
-  "entity_id": "01982f1e-dedc-7863-941c-fa4d1d95389c",
-  "columns_json": "{\"album_id\":\"01982f1e-dedc-7863-941c-fa255d8d889d\",\"artist_id\":\"01982f1e-dedc-7863-941c-fa034bd17890\"}",
-  "merged": false
+  "change": {
+    "id": "01982f1e-dedc-7863-941c-fa5584b872c1",
+    "author_id": "01982f1e-dedb-75a2-98d9-088958068486",
+    "entity_type": "AlbumArtist",
+    "entity_id": "01982f1e-dedc-7863-941c-fa4d1d95389c",
+    "merged": false
+  },
+  "fields": [
+    {
+      "field_name": "album_id",
+      "field_value": "01982f1e-dedc-7863-941c-fa255d8d889d"
+    },
+    {
+      "field_name": "artist_id", 
+      "field_value": "01982f1e-dedc-7863-941c-fa034bd17890"
+    },
+    {
+      "field_name": "cover_art",
+      "field_value": <binary data as MessagePack Binary type>
+    }
+  ]
 }
 ```
