@@ -60,13 +60,13 @@ impl SyncEngine {
     ///     3. Save the entity
     pub fn sync(&self, db: &Db) -> Result<()> {
         // 1. Get the sets of local and remote change_ids.
-        log::debug!("Sync: Getting change lists.");
+        log::info!("Sync: Getting change lists.");
         let local_change_ids = self.list_local_change_ids(db)?
             .into_iter().collect::<HashSet<_>>();
         let remote_change_ids = self.list_remote_change_ids()?
             .into_iter().collect::<HashSet<_>>();
 
-        log::debug!("Sync: Syncing {} local and {} remote changes.", 
+        log::info!("Sync: Syncing {} local and {} remote changes.", 
             local_change_ids.len(), remote_change_ids.len());
 
         // 2. For any remote change_id not in the local set, download and insert
@@ -74,7 +74,7 @@ impl SyncEngine {
         let missing_remote_change_ids = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        log::debug!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
+        log::info!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
         missing_remote_change_ids.par_iter().for_each(|remote_change_id| {
             if let Ok(remote_change) = self.get_remote_change(remote_change_id) {
                 // TODO handle error
@@ -86,7 +86,7 @@ impl SyncEngine {
         let missing_local_change_ids = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        log::debug!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
+        log::info!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
         missing_local_change_ids.par_iter().for_each(|local_change_id| {
             if let Ok(remote_change) = self.get_local_change_as_remote(db, local_change_id) {
                 // TODO handle error
@@ -96,7 +96,7 @@ impl SyncEngine {
 
         // 4-8. Process unmerged changes.
         let result = self.merge_unmerged_changes(db);
-        log::debug!("Sync: Done. =============");
+        log::info!("Sync: Done. =============");
         result
     }
 
