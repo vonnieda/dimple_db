@@ -1,19 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::{anyhow, Result};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use rusqlite::OptionalExtension;
-
-use crate::{db::{ChangeRecord, RemoteChangeRecord, RemoteFieldRecord, Db, transaction::DbTransaction, changelog::{sql_value_to_msgpack, msgpack_to_sql_value}, DbEvent}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
-
-#[derive(Debug)]
-struct AttributeChange {
-    change_id: String,
-    entity_type: String,
-    entity_id: String,
-    attribute: String,
-    new_value: rusqlite::types::Value,
-}
+use rmpv::Value as MsgPackValue;
+use crate::{db::{changelog, ChangeRecord, Db, RemoteChangeRecord, RemoteFieldRecord}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -95,225 +85,9 @@ impl SyncEngine {
         });
 
         // 4-8. Process unmerged changes.
-        let result = self.merge_unmerged_changes(db);
+        let result = changelog::merge_unmerged_changes(db);
         log::info!("Sync: Done. =============");
         result
-    }
-
-    fn merge_unmerged_changes(&self, db: &Db) -> Result<()> {
-        db.transaction(|txn| {
-            // Get unmerged changes
-            // Vec<ChangeRecord>
-            let unmerged_changes = txn.query::<ChangeRecord, _>(
-                "SELECT id, author_id, entity_type, entity_id, merged 
-                 FROM ZV_CHANGE 
-                 WHERE merged = false 
-                 ORDER BY id",
-                ()
-            )?;
-
-            log::debug!("Sync: Merging {} new changes.", unmerged_changes.len());
-
-            // Extract individual attribute changes
-            // Vec<AttributeChange>
-            let attribute_changes = self.extract_attribute_changes(txn, &unmerged_changes)?;
-
-            // Reduce to newest changes per attribute
-            // HashMap<(entity_type, entity_id, attribute), AttributeChange>
-            let newest_changes = self.reduce_to_newest_changes(attribute_changes);
-
-            // Group by entity and apply updates
-            // HashMap<(entity_type, entity_id), Vec<AttributeChange>>
-            let entity_updates = self.group_changes_by_entity(newest_changes);
-
-            // Sort entity updates by the earliest change ID to maintain creation order
-            // This ensures parent entities are created before child entities with foreign keys
-            let mut sorted_updates: Vec<_> = entity_updates.into_iter().collect();
-            sorted_updates.sort_by(|a, b| {
-                // Find the earliest change ID for each entity
-                let min_a = a.1.iter().map(|c| &c.change_id).min();
-                let min_b = b.1.iter().map(|c| &c.change_id).min();
-                min_a.cmp(&min_b)
-            });
-
-            // Apply all entity updates in sorted order
-            for ((entity_type, entity_id), changes) in sorted_updates {
-                self.apply_entity_updates(txn, &entity_type, &entity_id, changes)?;
-            }
-
-            // Mark all changes as merged
-            txn.txn().execute(
-                "UPDATE ZV_CHANGE SET merged = true WHERE merged = false",
-                []
-            )?;
-
-            Ok(())
-        })
-    }
-
-    fn extract_attribute_changes(&self, txn: &DbTransaction, unmerged_changes: &[ChangeRecord]) -> Result<Vec<AttributeChange>> {
-        let mut attribute_changes = Vec::new();
-
-        for change in unmerged_changes {
-            let mut stmt = txn.txn().prepare(
-                "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
-            )?;
-            let mut rows = stmt.query([&change.id])?;
-            
-            while let Some(row) = rows.next()? {
-                let field_name: String = row.get(0)?;
-                let value = row.get_ref(1)?.into();
-                
-                attribute_changes.push(AttributeChange {
-                    change_id: change.id.clone(),
-                    entity_type: change.entity_type.clone(),
-                    entity_id: change.entity_id.clone(),
-                    attribute: field_name,
-                    new_value: value,
-                });
-            }
-        }
-
-        Ok(attribute_changes)
-    }
-
-    fn reduce_to_newest_changes(&self, attribute_changes: Vec<AttributeChange>) -> HashMap<(String, String, String), AttributeChange> {
-        let mut newest_changes: HashMap<(String, String, String), AttributeChange> = HashMap::new();
-
-        for change in attribute_changes {
-            let key = (
-                change.entity_type.clone(), 
-                change.entity_id.clone(), 
-                change.attribute.clone()
-            );
-
-            match newest_changes.get(&key) {
-                Some(existing) if existing.change_id >= change.change_id => {
-                    // Keep existing (it's newer)
-                }
-                _ => {
-                    // Insert new or replace with newer
-                    newest_changes.insert(key, change);
-                }
-            }
-        }
-
-        newest_changes
-    }
-
-    fn group_changes_by_entity(&self, newest_changes: HashMap<(String, String, String), AttributeChange>) -> HashMap<(String, String), Vec<AttributeChange>> {
-        let mut entity_updates = HashMap::new();
-
-        for (_, change) in newest_changes {
-            let key = (change.entity_type.clone(), change.entity_id.clone());
-            entity_updates.entry(key).or_insert_with(Vec::new).push(change);
-        }
-
-        entity_updates
-    }
-
-    fn apply_entity_updates(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str, changes: Vec<AttributeChange>) -> Result<()> {
-        let exists = self.entity_exists(txn, entity_type, entity_id)?;
-        
-        // Get table columns
-        let column_names = txn.db().table_column_names(txn.txn(), entity_type)?;
-        
-        // Build a map of column -> value for the changes we need to apply
-        let mut updates: HashMap<String, rusqlite::types::Value> = HashMap::new();
-        
-        // Apply only changes that are actually the latest for each attribute
-        for change in changes {
-            // Query the changelog to find the latest change for this attribute
-            let latest_change_id: Option<String> = txn.txn().query_row(
-                "SELECT c.id FROM ZV_CHANGE c 
-                 JOIN ZV_CHANGE_FIELD cf ON c.id = cf.change_id 
-                 WHERE c.entity_type = ? AND c.entity_id = ? 
-                 AND cf.field_name = ?
-                 ORDER BY c.id DESC 
-                 LIMIT 1",
-                rusqlite::params![
-                    entity_type,
-                    entity_id,
-                    &change.attribute
-                ],
-                |row| row.get(0)
-            ).optional()?;
-
-            // Only apply this change if it's the latest one for this attribute
-            if let Some(latest_id) = latest_change_id {
-                if latest_id == change.change_id {
-                    updates.insert(change.attribute, change.new_value);
-                }
-            } else {
-                // No existing change for this attribute, so apply it
-                updates.insert(change.attribute, change.new_value);
-            }
-        }
-        
-        if updates.is_empty() {
-            return Ok(());
-        }
-        
-        if exists {
-            // Build UPDATE statement
-            let set_clauses: Vec<String> = updates.keys()
-                .filter(|col| column_names.contains(col))
-                .map(|col| format!("{} = ?", col))
-                .collect();
-            
-            if set_clauses.is_empty() {
-                return Ok(());
-            }
-            
-            let sql = format!("UPDATE {} SET {} WHERE id = ?", entity_type, set_clauses.join(", "));
-            
-            // Build parameters
-            let mut params: Vec<rusqlite::types::Value> = updates.iter()
-                .filter(|(col, _)| column_names.contains(col))
-                .map(|(_, val)| val.clone())
-                .collect();
-            params.push(rusqlite::types::Value::Text(entity_id.to_string()));
-            
-            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
-            
-            // Queue update event for notification
-            txn.add_pending_event(DbEvent::Update(entity_type.to_string(), entity_id.to_string()));
-        } else {
-            // Build INSERT statement
-            let mut insert_columns = vec!["id"];
-            let mut placeholders = vec!["?"];
-            let mut params = vec![rusqlite::types::Value::Text(entity_id.to_string())];
-            
-            for col in &column_names {
-                if col != "id" && updates.contains_key(col) {
-                    insert_columns.push(col);
-                    placeholders.push("?");
-                    params.push(updates.get(col).unwrap().clone());
-                }
-            }
-            
-            let sql = format!(
-                "INSERT INTO {} ({}) VALUES ({})", 
-                entity_type, 
-                insert_columns.join(", "),
-                placeholders.join(", ")
-            );
-            
-            txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
-            
-            // Queue insert event for notification
-            txn.add_pending_event(DbEvent::Insert(entity_type.to_string(), entity_id.to_string()));
-        }
-
-        Ok(())
-    }
-
-    fn entity_exists(&self, txn: &DbTransaction, entity_type: &str, entity_id: &str) -> Result<bool> {
-        Ok(txn.txn().query_row(
-            &format!("SELECT 1 FROM {} WHERE id = ?", entity_type),
-            rusqlite::params![entity_id],
-            |_| Ok(())
-        ).is_ok())
     }
 
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
@@ -418,6 +192,45 @@ impl SyncEngine {
         let data = rmp_serde::to_vec(remote_change)?;
         self.storage.put(&path, &data)?;
         Ok(())
+    }
+}
+
+/// Convert a rusqlite::Value to a MessagePack Value
+pub fn sql_value_to_msgpack(value: &rusqlite::types::Value) -> MsgPackValue {
+    match value {
+        rusqlite::types::Value::Null => MsgPackValue::Nil,
+        rusqlite::types::Value::Integer(i) => MsgPackValue::Integer((*i).into()),
+        rusqlite::types::Value::Real(f) => MsgPackValue::F64(*f),
+        rusqlite::types::Value::Text(s) => MsgPackValue::String(s.clone().into()),
+        rusqlite::types::Value::Blob(b) => MsgPackValue::Binary(b.clone()),
+    }
+}
+
+/// Convert a MessagePack Value back to a rusqlite::Value
+pub fn msgpack_to_sql_value(value: &MsgPackValue) -> rusqlite::types::Value {
+    match value {
+        MsgPackValue::Nil => rusqlite::types::Value::Null,
+        MsgPackValue::Boolean(b) => rusqlite::types::Value::Integer(*b as i64),
+        MsgPackValue::Integer(i) => {
+            if let Some(i64_val) = i.as_i64() {
+                rusqlite::types::Value::Integer(i64_val)
+            } else if let Some(u64_val) = i.as_u64() {
+                rusqlite::types::Value::Integer(u64_val as i64)
+            } else {
+                rusqlite::types::Value::Null
+            }
+        },
+        MsgPackValue::F32(f) => rusqlite::types::Value::Real(*f as f64),
+        MsgPackValue::F64(f) => rusqlite::types::Value::Real(*f),
+        MsgPackValue::String(s) => {
+            if let Some(string) = s.as_str() {
+                rusqlite::types::Value::Text(string.to_string())
+            } else {
+                rusqlite::types::Value::Null
+            }
+        },
+        MsgPackValue::Binary(b) => rusqlite::types::Value::Blob(b.clone()),
+        _ => rusqlite::types::Value::Null,
     }
 }
 
