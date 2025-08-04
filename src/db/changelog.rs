@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension as _};
 use uuid::Uuid;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::{db::{transaction::{DbTransaction, DbValue}, ChangeRecord, DbEvent}, Db};
+use crate::{db::{transaction::{DbTransaction, DbValue}, ChangelogChange, DbEvent}, Db};
 
 #[derive(Debug)]
 struct AttributeChange {
@@ -156,7 +156,7 @@ pub (crate) fn merge_unmerged_changes(db: &Db) -> Result<()> {
     db.transaction(|txn| {
         // Get unmerged changes
         // Vec<ChangeRecord>
-        let unmerged_changes = txn.query::<ChangeRecord, _>(
+        let unmerged_changes = txn.query::<ChangelogChange, _>(
             "SELECT id, author_id, entity_type, entity_id, merged 
                 FROM ZV_CHANGE 
                 WHERE merged = false 
@@ -203,7 +203,7 @@ pub (crate) fn merge_unmerged_changes(db: &Db) -> Result<()> {
     })
 }
 
-fn extract_attribute_changes(txn: &DbTransaction, unmerged_changes: &[ChangeRecord]) -> Result<Vec<AttributeChange>> {
+fn extract_attribute_changes(txn: &DbTransaction, unmerged_changes: &[ChangelogChange]) -> Result<Vec<AttributeChange>> {
     let mut attribute_changes = Vec::new();
 
     for change in unmerged_changes {
@@ -373,7 +373,7 @@ mod tests {
     use anyhow::Result;
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{Db, db::ChangeRecord};
+    use crate::{Db, db::ChangelogChange};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default)]
     struct Artist {
@@ -391,7 +391,7 @@ mod tests {
         Ok(db)
     }
 
-    fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangeRecord>> {
+    fn get_changes(db: &Db, entity_id: &str) -> Result<Vec<ChangelogChange>> {
         db.query(
             "SELECT id, author_id, entity_type, entity_id, merged 
              FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",

@@ -55,7 +55,6 @@ impl QuerySubscription {
                         let table_name = match &event {
                             DbEvent::Insert(table, _) => table,
                             DbEvent::Update(table, _) => table,
-                            DbEvent::Delete(table, _) => table,
                         };
                         
                         if tables_clone.contains(table_name) {

@@ -8,7 +8,7 @@ impl<T> Entity for T where T: Serialize + DeserializeOwned {}
 
 /// Represents a change record in the ZV_CHANGE table
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangeRecord {
+pub struct ChangelogChange {
     pub id: String,
     pub author_id: String,
     pub entity_type: String,
@@ -18,7 +18,7 @@ pub struct ChangeRecord {
 
 /// Represents a field change record in the ZV_CHANGE_FIELD table
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChangeFieldRecord {
+pub struct ChangelogField {
     pub change_id: String,
     pub field_name: String,
     pub field_value: Vec<u8>,
@@ -26,8 +26,8 @@ pub struct ChangeFieldRecord {
 
 /// Combined record for remote storage containing change + field records
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RemoteChangeRecord {
-    pub change: ChangeRecord,
+pub struct ChangelogChangeWithFields {
+    pub change: ChangelogChange,
     pub fields: Vec<RemoteFieldRecord>,
 }
 
@@ -44,5 +44,4 @@ pub struct RemoteFieldRecord {
 pub enum DbEvent {
     Insert(String, String),
     Update(String, String),
-    Delete(String, String), // Currently unimplemented, may come with tombstones.
 }

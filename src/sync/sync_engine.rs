@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use anyhow::{anyhow, Result};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rmpv::Value as MsgPackValue;
-use crate::{db::{changelog, ChangeRecord, Db, RemoteChangeRecord, RemoteFieldRecord}, sync::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}};
+
+use crate::{db::{self, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -79,13 +80,13 @@ impl SyncEngine {
         });
 
         // 4-8. Process unmerged changes.
-        let result = changelog::merge_unmerged_changes(db);
+        let result = db::changelog::merge_unmerged_changes(db);
         log::info!("Sync: Done. =============");
         result
     }
 
     fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
-        Ok(db.query::<ChangeRecord, _>("SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
+        Ok(db.query::<ChangelogChange, _>("SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
             .iter().map(|change| change.id.clone())
             .collect())
     }
@@ -107,12 +108,12 @@ impl SyncEngine {
         Ok(change_ids)
     }
 
-    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangeRecord> {
-        let results = db.query::<ChangeRecord, _>("SELECT * FROM ZV_CHANGE WHERE id = ?", (change_id,))?;
+    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangelogChange> {
+        let results = db.query::<ChangelogChange, _>("SELECT * FROM ZV_CHANGE WHERE id = ?", (change_id,))?;
         results.into_iter().next().ok_or_else(|| anyhow!("not found"))
     }
     
-    fn get_local_change_as_remote(&self, db: &Db, change_id: &str) -> Result<RemoteChangeRecord> {
+    fn get_local_change_as_remote(&self, db: &Db, change_id: &str) -> Result<ChangelogChangeWithFields> {
         let change = self.get_local_change(db, change_id)?;
         
         let fields = db.transaction(|txn| {
@@ -135,20 +136,20 @@ impl SyncEngine {
             Ok(fields)
         })?;
         
-        Ok(RemoteChangeRecord {
+        Ok(ChangelogChangeWithFields {
             change,
             fields,
         })
     }
 
-    fn get_remote_change(&self, change_id: &str) -> Result<RemoteChangeRecord> {
+    fn get_remote_change(&self, change_id: &str) -> Result<ChangelogChangeWithFields> {
         let path = self.prefixed_path(&format!("changes/{}.msgpack", change_id));
         let data = self.storage.get(&path)?;
-        let remote_change: RemoteChangeRecord = rmp_serde::from_slice(&data)?;
+        let remote_change: ChangelogChangeWithFields = rmp_serde::from_slice(&data)?;
         Ok(remote_change)
     }
 
-    fn put_local_change(&self, db: &Db, remote_change: &RemoteChangeRecord) -> Result<()> {
+    fn put_local_change(&self, db: &Db, remote_change: &ChangelogChangeWithFields) -> Result<()> {
         db.transaction(|txn| {
             let change = &remote_change.change;
             
@@ -181,7 +182,7 @@ impl SyncEngine {
         })
     }
 
-    fn put_remote_change(&self, remote_change: &RemoteChangeRecord) -> Result<()> {
+    fn put_remote_change(&self, remote_change: &ChangelogChangeWithFields) -> Result<()> {
         let path = self.prefixed_path(&format!("changes/{}.msgpack", remote_change.change.id));
         let data = rmp_serde::to_vec(remote_change)?;
         self.storage.put(&path, &data)?;
@@ -283,7 +284,7 @@ impl SyncEngineBuilder {
 mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{Db, sync::SyncEngine, db::{ChangeRecord, DbEvent}};
+    use crate::{Db, sync::SyncEngine, db::{ChangelogChange, DbEvent}};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
     struct Artist {
@@ -572,7 +573,7 @@ mod tests {
                    "Device B's newer change was overwritten by older remote change!");
         
         // Debug: Check the change records in device B
-        let changes_b: Vec<ChangeRecord> = db_b.query(
+        let changes_b: Vec<ChangelogChange> = db_b.query(
             "SELECT * FROM ZV_CHANGE WHERE entity_id = ? ORDER BY id",
             [&artist.id]
         )?;
