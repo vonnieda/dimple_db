@@ -140,6 +140,18 @@ fn compute_entity_changes(old_entity: Option<&DbValue>,
     field_changes
 }
 
+
+
+/// These docs are out of date, but better than nothing.
+/// 
+/// 4. Get the local changes that are marked unmerged.
+/// 5. Map these, parsing the JSON, to &[(change_id, entity_name, entity_id, attribute, new_value)]
+/// 6. Reduce this to only the newest change for each (entity_name, entity_id, attribute)
+/// 7. Group these by (entity_name, entity_id)
+/// 8. For each group:
+///     1. Read the entity
+///     2. Update the entity fields from the values in the group
+///     3. Save the entity
 pub (crate) fn merge_unmerged_changes(db: &Db) -> Result<()> {
     db.transaction(|txn| {
         // Get unmerged changes

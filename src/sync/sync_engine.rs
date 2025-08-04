@@ -40,14 +40,8 @@ impl SyncEngine {
     /// 2. For any remote change_id not in the local set, download and insert
     /// it, setting merged = false. 
     /// 3. For any local change_id not in the remote set, upload it.
-    /// 4. Get the local changes that are marked unmerged.
-    /// 5. Map these, parsing the JSON, to &[(change_id, entity_name, entity_id, attribute, new_value)]
-    /// 6. Reduce this to only the newest change for each (entity_name, entity_id, attribute)
-    /// 7. Group these by (entity_name, entity_id)
-    /// 8. For each group:
-    ///     1. Read the entity
-    ///     2. Update the entity fields from the values in the group
-    ///     3. Save the entity
+    /// 
+    /// Call changelogs to merge entity updates.
     pub fn sync(&self, db: &Db) -> Result<()> {
         // 1. Get the sets of local and remote change_ids.
         log::info!("Sync: Getting change lists.");
