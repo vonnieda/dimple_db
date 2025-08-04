@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crate::db::{ChangelogChangeWithFields};
+use crate::changelog::{ChangelogChangeWithFields};
 
 /// Trait representing a changelog that can be synced between devices
 pub trait Changelog: Send + Sync {

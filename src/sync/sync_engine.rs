@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rmpv::Value as MsgPackValue;
 
-use crate::{db::{self, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
+use crate::{changelog::{ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -80,7 +80,7 @@ impl SyncEngine {
         });
 
         // 4-8. Process unmerged changes.
-        let result = db::changelog::merge_unmerged_changes(db);
+        let result = crate::changelog::merge_unmerged_changes(db);
         log::info!("Sync: Done. =============");
         result
     }
@@ -284,7 +284,7 @@ impl SyncEngineBuilder {
 mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{Db, sync::SyncEngine, db::{ChangelogChange, DbEvent}};
+    use crate::{changelog::ChangelogChange, db::DbEvent, sync::SyncEngine, Db};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
     struct Artist {

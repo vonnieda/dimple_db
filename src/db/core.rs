@@ -7,7 +7,7 @@ use rusqlite::{functions::FunctionFlags, Params, Transaction};
 use rusqlite_migration::{Migrations};
 use uuid::Uuid;
 
-use crate::db::{changelog, query::QuerySubscription, transaction::DbTransaction, types::DbEvent, Entity};
+use crate::db::{query::QuerySubscription, transaction::DbTransaction, DbEvent, Entity};
 
 #[derive(Clone)]
 pub struct Db {
@@ -130,7 +130,7 @@ impl Db {
 
     fn from_pool(pool: Pool<SqliteConnectionManager>) -> Result<Self> {
         let conn = pool.get()?;
-        changelog::init_change_tracking_tables(&conn)?;
+        crate::changelog::init_change_tracking_tables(&conn)?;
         let database_uuid: String = conn.query_row(
             "SELECT value FROM ZV_METADATA WHERE key = 'database_uuid'",
             [],
@@ -200,8 +200,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::db::Db;
-    use crate::db::types::DbEvent;
+    use crate::db::{Db, DbEvent};
 
     fn setup_db() -> Result<Db> {
         let db = Db::open_memory()?;

@@ -3,7 +3,7 @@ use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 
-use crate::{db::ChangelogChangeWithFields, storage::SyncStorage};
+use crate::{changelog::ChangelogChangeWithFields, storage::SyncStorage};
 use super::changelog::Changelog;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,12 +20,12 @@ impl ChangeBucket {
 }
 
 /// Remote changelog backed by storage with time-based bucketing
-pub struct RemoteChangelog<'a> {
+pub struct StorageChangelog<'a> {
     storage: &'a dyn SyncStorage,
     prefix: String,
 }
 
-impl<'a> RemoteChangelog<'a> {
+impl<'a> StorageChangelog<'a> {
     pub fn new(storage: &'a dyn SyncStorage, prefix: String) -> Self {
         Self { storage, prefix }
     }
@@ -65,7 +65,7 @@ impl<'a> RemoteChangelog<'a> {
     }
 }
 
-impl<'a> Changelog for RemoteChangelog<'a> {
+impl<'a> Changelog for StorageChangelog<'a> {
     fn get_all_change_ids(&self) -> Result<Vec<String>> {
         let bucket_prefix = self.prefixed_path("buckets/");
         let bucket_files = self.storage.list(&bucket_prefix)?;
