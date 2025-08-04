@@ -1,10 +1,12 @@
 pub mod changelog;
-pub mod storage_changelog;
+pub mod basic_storage_changelog;
+pub mod batching_storage_changelog;
 pub mod db_changelog;
 
 pub use changelog::*;
 use serde::{Deserialize, Serialize};
-pub use storage_changelog::*;
+pub use basic_storage_changelog::BasicStorageChangelog;
+pub use batching_storage_changelog::BatchingStorageChangelog;
 pub use db_changelog::*;
 
 /// Represents a change record in the ZV_CHANGE table

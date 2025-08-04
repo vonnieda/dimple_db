@@ -8,10 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::{db::{transaction::{DbTransaction, DbValue}, DbEvent}};
 
-/// TODO: bring the db changelog code over to this, such as the table init and
-/// track_changes function. Then in Db we're just creating a DbChangelog and
-/// using it. So clean.
-
 pub struct DbChangelog {
     db: Db,
 }
@@ -20,8 +16,6 @@ impl DbChangelog {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
-
-    // TODO pub 
 }
 
 impl Changelog for DbChangelog {
@@ -33,44 +27,45 @@ impl Changelog for DbChangelog {
         Ok(changes.into_iter().map(|c| c.id).collect())
     }
     
-    fn get_changes_after(&self, after_id: Option<&str>) -> Result<Vec<ChangelogChangeWithFields>> {
-        let changes = if let Some(after) = after_id {
-            self.db.query::<ChangelogChange, _>(
-                "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id > ? ORDER BY id ASC",
-                (after,)
-            )?
-        } else {
-            self.db.query::<ChangelogChange, _>(
-                "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC",
-                ()
-            )?
-        };
+    fn get_changes(&self, start_id: &str, end_id: &str) -> Result<Vec<ChangelogChangeWithFields>> {
+        todo!()
+        // let changes = if let Some(after) = after_id {
+        //     self.db.query::<ChangelogChange, _>(
+        //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id > ? ORDER BY id ASC",
+        //         (after,)
+        //     )?
+        // } else {
+        //     self.db.query::<ChangelogChange, _>(
+        //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC",
+        //         ()
+        //     )?
+        // };
         
-        let mut remote_changes = Vec::new();
-        for change in changes {
-            let fields = self.db.transaction(|txn| {
-                let mut stmt = txn.txn().prepare(
-                    "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
-                )?;
-                let mut rows = stmt.query([&change.id])?;
+        // let mut remote_changes = Vec::new();
+        // for change in changes {
+        //     let fields = self.db.transaction(|txn| {
+        //         let mut stmt = txn.txn().prepare(
+        //             "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
+        //         )?;
+        //         let mut rows = stmt.query([&change.id])?;
                 
-                let mut fields = Vec::new();
-                while let Some(row) = rows.next()? {
-                    let field_name: String = row.get(0)?;
-                    let sql_value: rusqlite::types::Value = row.get_ref(1)?.into();
+        //         let mut fields = Vec::new();
+        //         while let Some(row) = rows.next()? {
+        //             let field_name: String = row.get(0)?;
+        //             let sql_value: rusqlite::types::Value = row.get_ref(1)?.into();
                     
-                    fields.push(RemoteFieldRecord {
-                        field_name,
-                        field_value: crate::sync::sync_engine::sql_value_to_msgpack(&sql_value),
-                    });
-                }
-                Ok(fields)
-            })?;
+        //             fields.push(RemoteFieldRecord {
+        //                 field_name,
+        //                 field_value: crate::sync::sync_engine::sql_value_to_msgpack(&sql_value),
+        //             });
+        //         }
+        //         Ok(fields)
+        //     })?;
             
-            remote_changes.push(ChangelogChangeWithFields { change, fields });
-        }
+        //     remote_changes.push(ChangelogChangeWithFields { change, fields });
+        // }
         
-        Ok(remote_changes)
+        // Ok(remote_changes)
     }
     
     fn append_changes(&self, changes: Vec<ChangelogChangeWithFields>) -> Result<()> {
@@ -104,16 +99,19 @@ impl Changelog for DbChangelog {
                 }
             }
             Ok(())
-        })
+        })?;
+        
+        // Process unmerged changes
+        merge_unmerged_changes(&self.db)
     }
     
-    fn has_change(&self, change_id: &str) -> Result<bool> {
-        let results = self.db.query::<ChangelogChange, _>(
-            "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id = ?",
-            (change_id,)
-        )?;
-        Ok(!results.is_empty())
-    }
+    // fn has_change(&self, change_id: &str) -> Result<bool> {
+    //     let results = self.db.query::<ChangelogChange, _>(
+    //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id = ?",
+    //         (change_id,)
+    //     )?;
+    //     Ok(!results.is_empty())
+    // }
 }
 
 
@@ -555,8 +553,8 @@ mod tests {
         assert_eq!(ids.len(), 0);
         
         // Add some data to create changes
-        let artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
-        let artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+        let _artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
+        let _artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
         
         // Should now have change IDs
         let ids = changelog.get_all_change_ids()?;
@@ -568,26 +566,26 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn db_changelog_get_changes_after() -> Result<()> {
-        let db = setup_db()?;
-        let changelog = DbChangelog::new(db.clone());
+    // #[test]
+    // fn db_changelog_get_changes_after() -> Result<()> {
+    //     let db = setup_db()?;
+    //     let changelog = DbChangelog::new(db.clone());
         
-        let artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
-        let artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+    //     let _artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
+    //     let _artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
         
-        // Get all changes
-        let all_changes = changelog.get_changes_after(None)?;
-        assert_eq!(all_changes.len(), 2);
+    //     // Get all changes
+    //     let all_changes = changelog.get_changes_after(None)?;
+    //     assert_eq!(all_changes.len(), 2);
         
-        // Get changes after first one
-        let first_change_id = &all_changes[0].change.id;
-        let later_changes = changelog.get_changes_after(Some(first_change_id))?;
-        assert_eq!(later_changes.len(), 1);
-        assert_eq!(later_changes[0].change.id, all_changes[1].change.id);
+    //     // Get changes after first one
+    //     let first_change_id = &all_changes[0].change.id;
+    //     let later_changes = changelog.get_changes_after(Some(first_change_id))?;
+    //     assert_eq!(later_changes.len(), 1);
+    //     assert_eq!(later_changes[0].change.id, all_changes[1].change.id);
         
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     #[test]
     fn db_changelog_append_changes() -> Result<()> {
@@ -626,26 +624,6 @@ mod tests {
         )?;
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].merged, false); // Should be false when appended
-        
-        Ok(())
-    }
-
-    #[test]
-    fn db_changelog_has_change() -> Result<()> {
-        let db = setup_db()?;
-        let changelog = DbChangelog::new(db.clone());
-        
-        // Initially should not have any changes
-        assert!(!changelog.has_change("nonexistent")?);
-        
-        // Add some data
-        let artist = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
-        let changes = get_changes(&db, &artist.id)?;
-        let change_id = &changes[0].id;
-        
-        // Should now have the change
-        assert!(changelog.has_change(change_id)?);
-        assert!(!changelog.has_change("still-nonexistent")?);
         
         Ok(())
     }

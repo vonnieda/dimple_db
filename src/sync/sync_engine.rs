@@ -37,16 +37,15 @@ impl GenericSyncEngine {
             local_change_ids.len(), remote_change_ids.len());
 
         // 2. For any remote change_id not in the local set, download and append it
-        let missing_remote_change_ids = remote_change_ids.iter()
+        let pending_remote_change_ids = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        log::info!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
+        log::info!("Sync: Downloading {} new changes.", pending_remote_change_ids.len());
         
         // Get all remote changes and filter to only the missing ones
-        if !missing_remote_change_ids.is_empty() {
-            let all_remote_changes = remote.get_changes_after(None)?;
+        if !pending_remote_change_ids.is_empty() {
             let missing_remote_changes: Vec<_> = all_remote_changes.into_iter()
-                .filter(|change| missing_remote_change_ids.contains(&&change.change.id))
+                .filter(|change| pending_remote_change_ids.contains(&&change.change.id))
                 .collect();
             
             if !missing_remote_changes.is_empty() {
@@ -99,9 +98,6 @@ impl SyncEngine {
         
         // Use the generic sync algorithm
         GenericSyncEngine::sync(&local_changelog, &remote_changelog)?;
-        
-        // Process unmerged changes
-        crate::changelog::merge_unmerged_changes(db)
     }
 
 }
@@ -716,13 +712,13 @@ mod tests {
         let storage_changelog = BatchingStorageChangelog::new(&storage, "test".to_string());
         
         // Add data to db1
-        let artist1 = db1.save(&Artist {
+        let _artist1 = db1.save(&Artist {
             name: "The Beatles".to_string(),
             ..Default::default()
         })?;
         
         // Add data to db2
-        let artist2 = db2.save(&Artist {
+        let _artist2 = db2.save(&Artist {
             name: "Pink Floyd".to_string(),
             ..Default::default()
         })?;
@@ -861,7 +857,7 @@ mod tests {
 
     #[test]
     fn performance_comparison_incremental_sync() -> anyhow::Result<()> {
-        use crate::{changelog::{Changelog, DbChangelog, BatchingStorageChangelog, BasicStorageChangelog}, storage::SlowInMemoryStorage};
+        use crate::{changelog::{DbChangelog, BatchingStorageChangelog, BasicStorageChangelog}, storage::SlowInMemoryStorage};
         use super::GenericSyncEngine;
         use std::time::Instant;
         

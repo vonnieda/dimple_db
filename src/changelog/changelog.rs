@@ -7,12 +7,8 @@ pub trait Changelog: Send + Sync {
     fn get_all_change_ids(&self) -> Result<Vec<String>>;
     
     /// Get changes after a specific change ID (or all if None)
-    fn get_changes_after(&self, after_id: Option<&str>) -> Result<Vec<ChangelogChangeWithFields>>;
+    fn get_changes(&self, start_id: &str, end_id: &str) -> Result<Vec<ChangelogChangeWithFields>>;
     
     /// Append new changes to the changelog
     fn append_changes(&self, changes: Vec<ChangelogChangeWithFields>) -> Result<()>;
-    
-    /// Check if a specific change exists
-    fn has_change(&self, change_id: &str) -> Result<bool>;
 }
-
