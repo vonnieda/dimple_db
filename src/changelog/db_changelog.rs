@@ -485,7 +485,8 @@ mod tests {
     use anyhow::Result;
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{changelog::ChangelogChange, Db};
+    use crate::{changelog::{Changelog, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, Db};
+    use super::DbChangelog;
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default)]
     struct Artist {
@@ -542,6 +543,111 @@ mod tests {
             rusqlite::types::Value::Null => "null".to_string(),
             rusqlite::types::Value::Blob(_) => "<blob>".to_string(),
         }
+    }
+
+    #[test]
+    fn db_changelog_get_all_change_ids() -> Result<()> {
+        let db = setup_db()?;
+        let changelog = DbChangelog::new(db.clone());
+        
+        // Initially empty
+        let ids = changelog.get_all_change_ids()?;
+        assert_eq!(ids.len(), 0);
+        
+        // Add some data to create changes
+        let artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
+        let artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+        
+        // Should now have change IDs
+        let ids = changelog.get_all_change_ids()?;
+        assert_eq!(ids.len(), 2);
+        
+        // IDs should be sorted
+        assert!(ids[0] < ids[1]);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn db_changelog_get_changes_after() -> Result<()> {
+        let db = setup_db()?;
+        let changelog = DbChangelog::new(db.clone());
+        
+        let artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
+        let artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
+        
+        // Get all changes
+        let all_changes = changelog.get_changes_after(None)?;
+        assert_eq!(all_changes.len(), 2);
+        
+        // Get changes after first one
+        let first_change_id = &all_changes[0].change.id;
+        let later_changes = changelog.get_changes_after(Some(first_change_id))?;
+        assert_eq!(later_changes.len(), 1);
+        assert_eq!(later_changes[0].change.id, all_changes[1].change.id);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn db_changelog_append_changes() -> Result<()> {
+        let db = setup_db()?;
+        let changelog = DbChangelog::new(db.clone());
+        
+        // Create a change to append
+        let change = ChangelogChangeWithFields {
+            change: ChangelogChange {
+                id: "01234567-1234-1234-1234-123456789012".to_string(),
+                author_id: "author1".to_string(),
+                entity_type: "Artist".to_string(),
+                entity_id: "artist1".to_string(),
+                merged: false,
+            },
+            fields: vec![
+                RemoteFieldRecord {
+                    field_name: "name".to_string(),
+                    field_value: rmpv::Value::String("Test Artist".to_string().into()),
+                },
+            ],
+        };
+        
+        // Append the change
+        changelog.append_changes(vec![change])?;
+        
+        // Verify it was inserted
+        let all_changes = changelog.get_all_change_ids()?;
+        assert_eq!(all_changes.len(), 1);
+        assert_eq!(all_changes[0], "01234567-1234-1234-1234-123456789012");
+        
+        // Verify the change has the correct merged status
+        let changes = db.query::<ChangelogChange, _>(
+            "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id = ?",
+            ["01234567-1234-1234-1234-123456789012"]
+        )?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].merged, false); // Should be false when appended
+        
+        Ok(())
+    }
+
+    #[test]
+    fn db_changelog_has_change() -> Result<()> {
+        let db = setup_db()?;
+        let changelog = DbChangelog::new(db.clone());
+        
+        // Initially should not have any changes
+        assert!(!changelog.has_change("nonexistent")?);
+        
+        // Add some data
+        let artist = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
+        let changes = get_changes(&db, &artist.id)?;
+        let change_id = &changes[0].id;
+        
+        // Should now have the change
+        assert!(changelog.has_change(change_id)?);
+        assert!(!changelog.has_change("still-nonexistent")?);
+        
+        Ok(())
     }
 
     #[test]

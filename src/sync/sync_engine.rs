@@ -1,14 +1,80 @@
 use std::collections::HashSet;
 
-use anyhow::{anyhow, Result};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use anyhow::Result;
 use rmpv::Value as MsgPackValue;
 
-use crate::{changelog::{ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
+use crate::{changelog::Changelog, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
     prefix: String,
+}
+
+pub struct GenericSyncEngine;
+
+impl GenericSyncEngine {
+    /// Sync algorithm that works with any two Changelog implementations
+    /// 
+    /// The goal is for every device/replica/author to have a complete copy of
+    /// the changelog. From the changelog we can replicate the entity state
+    /// at any point in time from the perspective of any author.
+    /// 
+    /// 1. Get the sets of local and remote change_ids.
+    /// 2. For any remote change_id not in the local set, download and insert
+    /// it, setting merged = false. 
+    /// 3. For any local change_id not in the remote set, upload it.
+    /// 
+    /// Call changelogs to merge entity updates.
+    pub fn sync(local: &dyn Changelog, remote: &dyn Changelog) -> Result<()> {
+        // 1. Get the sets of local and remote change_ids.
+        log::info!("Sync: Getting change lists.");
+        let local_change_ids = local.get_all_change_ids()?
+            .into_iter().collect::<HashSet<_>>();
+        let remote_change_ids = remote.get_all_change_ids()?
+            .into_iter().collect::<HashSet<_>>();
+
+        log::info!("Sync: Syncing {} local and {} remote changes.", 
+            local_change_ids.len(), remote_change_ids.len());
+
+        // 2. For any remote change_id not in the local set, download and append it
+        let missing_remote_change_ids = remote_change_ids.iter()
+            .filter(|id| !local_change_ids.contains(*id))
+            .collect::<Vec<_>>();
+        log::info!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
+        
+        // Get all remote changes and filter to only the missing ones
+        if !missing_remote_change_ids.is_empty() {
+            let all_remote_changes = remote.get_changes_after(None)?;
+            let missing_remote_changes: Vec<_> = all_remote_changes.into_iter()
+                .filter(|change| missing_remote_change_ids.contains(&&change.change.id))
+                .collect();
+            
+            if !missing_remote_changes.is_empty() {
+                local.append_changes(missing_remote_changes)?;
+            }
+        }
+
+        // 3. For any local change_id not in the remote set, upload it
+        let missing_local_change_ids = local_change_ids.iter()
+            .filter(|id| !remote_change_ids.contains(*id))
+            .collect::<Vec<_>>();
+        log::info!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
+        
+        // Get all local changes and filter to only the missing ones
+        if !missing_local_change_ids.is_empty() {
+            let all_local_changes = local.get_changes_after(None)?;
+            let missing_local_changes: Vec<_> = all_local_changes.into_iter()
+                .filter(|change| missing_local_change_ids.contains(&&change.change.id))
+                .collect();
+            
+            if !missing_local_changes.is_empty() {
+                remote.append_changes(missing_local_changes)?;
+            }
+        }
+
+        log::info!("Sync: Done. =============");
+        Ok(())
+    }
 }
 
 impl SyncEngine {
@@ -23,171 +89,21 @@ impl SyncEngine {
         SyncEngineBuilder::default()
     }
 
-    fn prefixed_path(&self, path: &str) -> String {
-        if self.prefix.is_empty() {
-            path.to_string()
-        } else {
-            format!("{}/{}", self.prefix, path)
-        }
-    }
 
-    /// # Sync Algorithm
-    /// 
-    /// The goal is for every device/replica/author to have a complete copy of
-    /// the changelog. From the changelog we can replicate the entity state
-    /// at any point in time from the perspective of any author.
-    /// 
-    /// 1. Get the sets of local and remote change_ids.
-    /// 2. For any remote change_id not in the local set, download and insert
-    /// it, setting merged = false. 
-    /// 3. For any local change_id not in the remote set, upload it.
-    /// 
-    /// Call changelogs to merge entity updates.
+    /// Sync using the generic sync algorithm with DbChangelog and BatchingStorageChangelog
     pub fn sync(&self, db: &Db) -> Result<()> {
-        // 1. Get the sets of local and remote change_ids.
-        log::info!("Sync: Getting change lists.");
-        let local_change_ids = self.list_local_change_ids(db)?
-            .into_iter().collect::<HashSet<_>>();
-        let remote_change_ids = self.list_remote_change_ids()?
-            .into_iter().collect::<HashSet<_>>();
-
-        log::info!("Sync: Syncing {} local and {} remote changes.", 
-            local_change_ids.len(), remote_change_ids.len());
-
-        // 2. For any remote change_id not in the local set, download and insert
-        // it, setting merged = false. 
-        let missing_remote_change_ids = remote_change_ids.iter()
-            .filter(|id| !local_change_ids.contains(*id))
-            .collect::<Vec<_>>();
-        log::info!("Sync: Downloading {} new changes.", missing_remote_change_ids.len());
-        missing_remote_change_ids.par_iter().for_each(|remote_change_id| {
-            if let Ok(remote_change) = self.get_remote_change(remote_change_id) {
-                // TODO handle error
-                let _ = self.put_local_change(db, &remote_change);
-            }
-        });
-
-        // 3. For any local change_id not in the remote set, upload it.
-        let missing_local_change_ids = local_change_ids.iter()
-            .filter(|id| !remote_change_ids.contains(*id))
-            .collect::<Vec<_>>();
-        log::info!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
-        missing_local_change_ids.par_iter().for_each(|local_change_id| {
-            if let Ok(remote_change) = self.get_local_change_as_remote(db, local_change_id) {
-                // TODO handle error
-                let _ = self.put_remote_change(&remote_change);
-            }
-        });
-
-        // 4-8. Process unmerged changes.
-        let result = crate::changelog::merge_unmerged_changes(db);
-        log::info!("Sync: Done. =============");
-        result
-    }
-
-    fn list_local_change_ids(&self, db: &Db) -> Result<Vec<String>> {
-        Ok(db.query::<ChangelogChange, _>("SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC", ())?
-            .iter().map(|change| change.id.clone())
-            .collect())
-    }
-
-    fn list_remote_change_ids(&self) -> Result<Vec<String>> {
-        let prefix = self.prefixed_path("changes/");
-        let files = self.storage.list(&prefix)?;
+        use crate::changelog::{DbChangelog, BatchingStorageChangelog};
         
-        let mut change_ids = Vec::new();
-        for file in files {
-            if let Some(path) = file.strip_prefix(&prefix) {
-                if let Some(change_id) = path.strip_suffix(".msgpack") {
-                    change_ids.push(change_id.to_string());
-                }
-            }
-        }
+        let local_changelog = DbChangelog::new(db.clone());
+        let remote_changelog = BatchingStorageChangelog::new(self.storage.as_ref(), self.prefix.clone());
         
-        change_ids.sort();
-        Ok(change_ids)
-    }
-
-    fn get_local_change(&self, db: &Db, change_id: &str) -> Result<ChangelogChange> {
-        let results = db.query::<ChangelogChange, _>("SELECT * FROM ZV_CHANGE WHERE id = ?", (change_id,))?;
-        results.into_iter().next().ok_or_else(|| anyhow!("not found"))
-    }
-    
-    fn get_local_change_as_remote(&self, db: &Db, change_id: &str) -> Result<ChangelogChangeWithFields> {
-        let change = self.get_local_change(db, change_id)?;
+        // Use the generic sync algorithm
+        GenericSyncEngine::sync(&local_changelog, &remote_changelog)?;
         
-        let fields = db.transaction(|txn| {
-            let mut stmt = txn.txn().prepare(
-                "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
-            )?;
-            let mut rows = stmt.query([change_id])?;
-            
-            // Convert to remote format
-            let mut fields = Vec::new();
-            while let Some(row) = rows.next()? {
-                let field_name: String = row.get(0)?;
-                let sql_value: rusqlite::types::Value = row.get_ref(1)?.into();
-                
-                fields.push(RemoteFieldRecord {
-                    field_name,
-                    field_value: sql_value_to_msgpack(&sql_value),
-                });
-            }
-            Ok(fields)
-        })?;
-        
-        Ok(ChangelogChangeWithFields {
-            change,
-            fields,
-        })
+        // Process unmerged changes
+        crate::changelog::merge_unmerged_changes(db)
     }
 
-    fn get_remote_change(&self, change_id: &str) -> Result<ChangelogChangeWithFields> {
-        let path = self.prefixed_path(&format!("changes/{}.msgpack", change_id));
-        let data = self.storage.get(&path)?;
-        let remote_change: ChangelogChangeWithFields = rmp_serde::from_slice(&data)?;
-        Ok(remote_change)
-    }
-
-    fn put_local_change(&self, db: &Db, remote_change: &ChangelogChangeWithFields) -> Result<()> {
-        db.transaction(|txn| {
-            let change = &remote_change.change;
-            
-            // Insert the change record
-            txn.txn().execute(
-                "INSERT OR IGNORE INTO ZV_CHANGE (id, author_id, entity_type, entity_id, merged) 
-                 VALUES (?, ?, ?, ?, false)",
-                rusqlite::params![
-                    &change.id,
-                    &change.author_id,
-                    &change.entity_type,
-                    &change.entity_id,
-                ]
-            )?;
-            
-            // Insert the field records - convert from MessagePack to SQL values
-            for field in &remote_change.fields {
-                let sql_value = msgpack_to_sql_value(&field.field_value);
-                txn.txn().execute(
-                    "INSERT OR IGNORE INTO ZV_CHANGE_FIELD (change_id, field_name, field_value) VALUES (?, ?, ?)",
-                    rusqlite::params![
-                        &change.id,
-                        &field.field_name,
-                        &sql_value,
-                    ]
-                )?;
-            }
-            
-            Ok(())
-        })
-    }
-
-    fn put_remote_change(&self, remote_change: &ChangelogChangeWithFields) -> Result<()> {
-        let path = self.prefixed_path(&format!("changes/{}.msgpack", remote_change.change.id));
-        let data = rmp_serde::to_vec(remote_change)?;
-        self.storage.put(&path, &data)?;
-        Ok(())
-    }
 }
 
 /// Convert a rusqlite::Value to a MessagePack Value
@@ -475,11 +391,11 @@ mod tests {
         // Sync to storage
         sync_engine.sync(&db1)?;
         
-        // Verify that the storage contains files with the prefix
-        let change_files = sync_engine.storage.list("test-prefix-123/changes/")?;
-        assert!(!change_files.is_empty(), "No change files found with prefix");
-        assert!(change_files.iter().all(|f| f.starts_with("test-prefix-123/changes/")), 
-                "Files don't have correct prefix: {:?}", change_files);
+        // Verify that the storage contains files with the prefix (now using buckets)
+        let bucket_files = sync_engine.storage.list("test-prefix-123/buckets/")?;
+        assert!(!bucket_files.is_empty(), "No bucket files found with prefix");
+        assert!(bucket_files.iter().all(|f| f.starts_with("test-prefix-123/buckets/")), 
+                "Files don't have correct prefix: {:?}", bucket_files);
         
         // Sync to db2 to verify it works end-to-end
         sync_engine.sync(&db2)?;
@@ -514,11 +430,11 @@ mod tests {
         // Sync to storage
         sync_engine.sync(&db)?;
         
-        // Verify that the storage contains files with the default prefix
-        let change_files = sync_engine.storage.list("dimple-sync/changes/")?;
-        assert!(!change_files.is_empty(), "No change files found with default prefix");
-        assert!(change_files.iter().all(|f| f.starts_with("dimple-sync/changes/")), 
-                "Files don't have correct default prefix: {:?}", change_files);
+        // Verify that the storage contains files with the default prefix (now using buckets)
+        let bucket_files = sync_engine.storage.list("dimple-sync/buckets/")?;
+        assert!(!bucket_files.is_empty(), "No bucket files found with default prefix");
+        assert!(bucket_files.iter().all(|f| f.starts_with("dimple-sync/buckets/")), 
+                "Files don't have correct default prefix: {:?}", bucket_files);
         
         Ok(())
     }
@@ -774,6 +690,238 @@ mod tests {
             }
             _ => panic!("Expected Update event, got {:?}", event),
         }
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_generic_sync_engine() -> anyhow::Result<()> {
+        use crate::{changelog::{DbChangelog, BatchingStorageChangelog}, storage::InMemoryStorage};
+        use super::GenericSyncEngine;
+        
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        let storage = InMemoryStorage::new();
+        
+        // Create changelogs
+        let db1_changelog = DbChangelog::new(db1.clone());
+        let db2_changelog = DbChangelog::new(db2.clone());
+        let storage_changelog = BatchingStorageChangelog::new(&storage, "test".to_string());
+        
+        // Add data to db1
+        let artist1 = db1.save(&Artist {
+            name: "The Beatles".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Add data to db2
+        let artist2 = db2.save(&Artist {
+            name: "Pink Floyd".to_string(),
+            ..Default::default()
+        })?;
+        
+        // Sync db1 to storage
+        GenericSyncEngine::sync(&db1_changelog, &storage_changelog)?;
+        
+        // Sync db2 to storage  
+        GenericSyncEngine::sync(&db2_changelog, &storage_changelog)?;
+        
+        // Sync storage back to db1 (should get Pink Floyd)
+        GenericSyncEngine::sync(&storage_changelog, &db1_changelog)?;
+        crate::changelog::merge_unmerged_changes(&db1)?;
+        
+        // Sync storage back to db2 (should get The Beatles)
+        GenericSyncEngine::sync(&storage_changelog, &db2_changelog)?;
+        crate::changelog::merge_unmerged_changes(&db2)?;
+        
+        // Both databases should now have both artists
+        let artists1: Vec<Artist> = db1.query("SELECT * FROM Artist ORDER BY name", ())?;
+        let artists2: Vec<Artist> = db2.query("SELECT * FROM Artist ORDER BY name", ())?;
+        
+        assert_eq!(artists1.len(), 2);
+        assert_eq!(artists2.len(), 2);
+        assert_eq!(artists1[0].name, "Pink Floyd");
+        assert_eq!(artists1[1].name, "The Beatles");
+        assert_eq!(artists2[0].name, "Pink Floyd");
+        assert_eq!(artists2[1].name, "The Beatles");
+        
+        Ok(())
+    }
+
+    #[test]
+    fn performance_comparison_small_dataset() -> anyhow::Result<()> {
+        use crate::{changelog::{Changelog, DbChangelog, BatchingStorageChangelog, BasicStorageChangelog}, storage::SlowInMemoryStorage};
+        use super::GenericSyncEngine;
+        use std::time::Instant;
+        
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        // Create test databases
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        // Add test data (20 records)
+        let num_records = 20;
+        for i in 0..num_records {
+            db1.save(&Artist {
+                name: format!("Artist {}", i),
+                country: Some("Test Country".to_string()),
+                ..Default::default()
+            })?;
+        }
+        
+        let storage = SlowInMemoryStorage::new(1, 10, 2); // Fast testing: GET: 1ms, PUT: 10ms, LIST: 2ms
+        let db_changelog = DbChangelog::new(db1.clone());
+        
+        // Test BatchingStorageChangelog
+        let batching_changelog = BatchingStorageChangelog::new(&storage, "batching".to_string());
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db_changelog, &batching_changelog)?;
+        let batching_duration = start.elapsed();
+        
+        // Test BasicStorageChangelog
+        let basic_changelog = BasicStorageChangelog::new(&storage, "basic".to_string());
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db_changelog, &basic_changelog)?;
+        let basic_duration = start.elapsed();
+        
+        println!("Small dataset ({} records):", num_records);
+        println!("  Batching approach: {:?}", batching_duration);
+        println!("  Basic approach:    {:?}", basic_duration);
+        println!("  Ratio: {:.2}x", basic_duration.as_nanos() as f64 / batching_duration.as_nanos() as f64);
+        
+        // Verify both approaches stored the same number of changes
+        assert_eq!(batching_changelog.get_all_change_ids()?.len(), num_records);
+        assert_eq!(basic_changelog.get_all_change_ids()?.len(), num_records);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn performance_comparison_large_dataset() -> anyhow::Result<()> {
+        use crate::{changelog::{Changelog, DbChangelog, BatchingStorageChangelog, BasicStorageChangelog}, storage::SlowInMemoryStorage};
+        use super::GenericSyncEngine;
+        use std::time::Instant;
+        
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        // Create test databases
+        let db1 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        
+        // Add test data (30 records - larger dataset)
+        let num_records = 30;
+        for i in 0..num_records {
+            db1.save(&Artist {
+                name: format!("Artist {}", i),
+                country: Some(format!("Country {}", i % 10)),
+                ..Default::default()
+            })?;
+        }
+        
+        let storage = SlowInMemoryStorage::new(1, 10, 2); // Fast testing: GET: 1ms, PUT: 10ms, LIST: 2ms
+        let db_changelog = DbChangelog::new(db1.clone());
+        
+        // Test BatchingStorageChangelog
+        let batching_changelog = BatchingStorageChangelog::new(&storage, "batching".to_string());
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db_changelog, &batching_changelog)?;
+        let batching_duration = start.elapsed();
+        
+        // Test BasicStorageChangelog
+        let basic_changelog = BasicStorageChangelog::new(&storage, "basic".to_string());
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db_changelog, &basic_changelog)?;
+        let basic_duration = start.elapsed();
+        
+        println!("Large dataset ({} records):", num_records);
+        println!("  Batching approach: {:?}", batching_duration);
+        println!("  Basic approach:    {:?}", basic_duration);
+        println!("  Ratio: {:.2}x", basic_duration.as_nanos() as f64 / batching_duration.as_nanos() as f64);
+        
+        // Verify both approaches stored the same number of changes
+        assert_eq!(batching_changelog.get_all_change_ids()?.len(), num_records);
+        assert_eq!(basic_changelog.get_all_change_ids()?.len(), num_records);
+        
+        Ok(())
+    }
+
+    #[test]
+    fn performance_comparison_incremental_sync() -> anyhow::Result<()> {
+        use crate::{changelog::{Changelog, DbChangelog, BatchingStorageChangelog, BasicStorageChangelog}, storage::SlowInMemoryStorage};
+        use super::GenericSyncEngine;
+        use std::time::Instant;
+        
+        let migrations = Migrations::new(vec![
+            M::up("CREATE TABLE Artist (id TEXT PRIMARY KEY, name TEXT NOT NULL, country TEXT);"),
+        ]);
+        
+        // Create test databases
+        let db1 = Db::open_memory()?;
+        let db2 = Db::open_memory()?;
+        db1.migrate(&migrations)?;
+        db2.migrate(&migrations)?;
+        
+        // Add initial data to both databases
+        let initial_records = 15;
+        for i in 0..initial_records {
+            db1.save(&Artist {
+                name: format!("Initial Artist {}", i),
+                ..Default::default()
+            })?;
+            db2.save(&Artist {
+                name: format!("Initial Artist {}", i),
+                ..Default::default()
+            })?;
+        }
+        
+        let storage = SlowInMemoryStorage::new(1, 10, 2); // Fast testing: GET: 1ms, PUT: 10ms, LIST: 2ms
+        let db1_changelog = DbChangelog::new(db1.clone());
+        let db2_changelog = DbChangelog::new(db2.clone());
+        
+        // Do initial sync with both approaches
+        let batching_changelog = BatchingStorageChangelog::new(&storage, "batching".to_string());
+        let basic_changelog = BasicStorageChangelog::new(&storage, "basic".to_string());
+        
+        GenericSyncEngine::sync(&db1_changelog, &batching_changelog)?;
+        GenericSyncEngine::sync(&db1_changelog, &basic_changelog)?;
+        
+        // Add incremental changes to db2
+        let incremental_records = 5;
+        for i in 0..incremental_records {
+            db2.save(&Artist {
+                name: format!("New Artist {}", i),
+                country: Some("New Country".to_string()),
+                ..Default::default()
+            })?;
+        }
+        
+        // Test incremental sync performance
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db2_changelog, &batching_changelog)?;
+        let batching_incremental = start.elapsed();
+        
+        let start = Instant::now();
+        GenericSyncEngine::sync(&db2_changelog, &basic_changelog)?;
+        let basic_incremental = start.elapsed();
+        
+        println!("Incremental sync ({} new records on top of {}):", incremental_records, initial_records);
+        println!("  Batching approach: {:?}", batching_incremental);
+        println!("  Basic approach:    {:?}", basic_incremental);
+        println!("  Ratio: {:.2}x", basic_incremental.as_nanos() as f64 / batching_incremental.as_nanos() as f64);
         
         Ok(())
     }
