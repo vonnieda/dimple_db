@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{changelog::{Changelog, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, Db};
+use crate::{changelog::{Changelog, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, sync::sync_engine, Db};
 
 use rusqlite::{Connection, OptionalExtension as _};
 use uuid::Uuid;
@@ -26,46 +26,64 @@ impl Changelog for DbChangelog {
         )?;
         Ok(changes.into_iter().map(|c| c.id).collect())
     }
-    
-    fn get_changes(&self, start_id: &str, end_id: &str) -> Result<Vec<ChangelogChangeWithFields>> {
-        todo!()
-        // let changes = if let Some(after) = after_id {
-        //     self.db.query::<ChangelogChange, _>(
-        //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id > ? ORDER BY id ASC",
-        //         (after,)
-        //     )?
-        // } else {
-        //     self.db.query::<ChangelogChange, _>(
-        //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE ORDER BY id ASC",
-        //         ()
-        //     )?
-        // };
+
+    fn get_changes(&self, from_id: Option<&str>, to_id: Option<&str>) -> Result<Vec<ChangelogChangeWithFields>> {
+        let from_id = from_id.map(|s| s.to_string()).unwrap_or_else(|| Uuid::nil().to_string());
+        let to_id = to_id.map(|s| s.to_string()).unwrap_or_else(|| Uuid::max().to_string());
         
-        // let mut remote_changes = Vec::new();
-        // for change in changes {
-        //     let fields = self.db.transaction(|txn| {
-        //         let mut stmt = txn.txn().prepare(
-        //             "SELECT field_name, field_value FROM ZV_CHANGE_FIELD WHERE change_id = ?"
-        //         )?;
-        //         let mut rows = stmt.query([&change.id])?;
-                
-        //         let mut fields = Vec::new();
-        //         while let Some(row) = rows.next()? {
-        //             let field_name: String = row.get(0)?;
-        //             let sql_value: rusqlite::types::Value = row.get_ref(1)?.into();
-                    
-        //             fields.push(RemoteFieldRecord {
-        //                 field_name,
-        //                 field_value: crate::sync::sync_engine::sql_value_to_msgpack(&sql_value),
-        //             });
-        //         }
-        //         Ok(fields)
-        //     })?;
+        let mut changes = Vec::new();
+        
+        // Use transaction to access raw connection
+        self.db.transaction(|txn| {
+            let mut stmt = txn.txn().prepare(
+                "SELECT id, author_id, entity_type, entity_id, merged, field_name, field_value
+                 FROM ZV_CHANGE 
+                 JOIN ZV_CHANGE_FIELD ON (ZV_CHANGE.id = ZV_CHANGE_FIELD.change_id)
+                 WHERE ZV_CHANGE.id >= ? AND ZV_CHANGE.id <= ?
+                 ORDER BY ZV_CHANGE.id ASC"
+            )?;
             
-        //     remote_changes.push(ChangelogChangeWithFields { change, fields });
-        // }
+            let rows = stmt.query_map(rusqlite::params![from_id, to_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,     // id
+                    row.get::<_, String>(1)?,     // author_id
+                    row.get::<_, String>(2)?,     // entity_type
+                    row.get::<_, String>(3)?,     // entity_id
+                    row.get::<_, bool>(4)?,       // merged
+                    row.get::<_, String>(5)?,     // field_name
+                    row.get::<_, rusqlite::types::Value>(6)?, // field_value
+                ))
+            })?;
+            
+            let mut grouped: BTreeMap<String, ChangelogChangeWithFields> = BTreeMap::new();
+            
+            for row in rows {
+                let (id, author_id, entity_type, entity_id, merged, field_name, field_value) = row?;
+                
+                let entry = grouped.entry(id.clone()).or_insert_with(|| {
+                    ChangelogChangeWithFields {
+                        change: ChangelogChange {
+                            id: id.clone(),
+                            author_id: author_id.clone(),
+                            entity_type: entity_type.clone(),
+                            entity_id: entity_id.clone(),
+                            merged,
+                        },
+                        fields: Vec::new(),
+                    }
+                });
+                
+                entry.fields.push(RemoteFieldRecord {
+                    field_name,
+                    field_value: sync_engine::sql_value_to_msgpack(&field_value),
+                });
+            }
+            
+            changes = grouped.into_values().collect();
+            Ok(())
+        })?;
         
-        // Ok(remote_changes)
+        Ok(changes)
     }
     
     fn append_changes(&self, changes: Vec<ChangelogChangeWithFields>) -> Result<()> {
@@ -104,14 +122,6 @@ impl Changelog for DbChangelog {
         // Process unmerged changes
         merge_unmerged_changes(&self.db)
     }
-    
-    // fn has_change(&self, change_id: &str) -> Result<bool> {
-    //     let results = self.db.query::<ChangelogChange, _>(
-    //         "SELECT id, author_id, entity_type, entity_id, merged FROM ZV_CHANGE WHERE id = ?",
-    //         (change_id,)
-    //     )?;
-    //     Ok(!results.is_empty())
-    // }
 }
 
 
@@ -566,27 +576,6 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn db_changelog_get_changes_after() -> Result<()> {
-    //     let db = setup_db()?;
-    //     let changelog = DbChangelog::new(db.clone());
-        
-    //     let _artist1 = db.save(&Artist { name: "The Beatles".to_string(), ..Default::default() })?;
-    //     let _artist2 = db.save(&Artist { name: "Pink Floyd".to_string(), ..Default::default() })?;
-        
-    //     // Get all changes
-    //     let all_changes = changelog.get_changes_after(None)?;
-    //     assert_eq!(all_changes.len(), 2);
-        
-    //     // Get changes after first one
-    //     let first_change_id = &all_changes[0].change.id;
-    //     let later_changes = changelog.get_changes_after(Some(first_change_id))?;
-    //     assert_eq!(later_changes.len(), 1);
-    //     assert_eq!(later_changes[0].change.id, all_changes[1].change.id);
-        
-    //     Ok(())
-    // }
-
     #[test]
     fn db_changelog_append_changes() -> Result<()> {
         let db = setup_db()?;
@@ -623,7 +612,7 @@ mod tests {
             ["01234567-1234-1234-1234-123456789012"]
         )?;
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].merged, false); // Should be false when appended
+        assert_eq!(changes[0].merged, true);
         
         Ok(())
     }

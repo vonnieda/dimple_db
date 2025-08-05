@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use rmpv::Value as MsgPackValue;
 
-use crate::{changelog::Changelog, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
+use crate::{changelog::{BasicStorageChangelog, Changelog}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -37,39 +37,24 @@ impl GenericSyncEngine {
             local_change_ids.len(), remote_change_ids.len());
 
         // 2. For any remote change_id not in the local set, download and append it
-        let pending_remote_change_ids = remote_change_ids.iter()
+        let change_ids_to_pull = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        log::info!("Sync: Downloading {} new changes.", pending_remote_change_ids.len());
+        log::info!("Sync: Pulling {} new changes.", change_ids_to_pull.len());
+        let pull_min = change_ids_to_pull.iter().min().cloned().map(|s| s.as_str());
+        let pull_max = change_ids_to_pull.iter().max().cloned().map(|s| s.as_str());
+        let pulled_changes = remote.get_changes(pull_min, pull_max)?;
+        local.append_changes(pulled_changes)?;
         
-        // Get all remote changes and filter to only the missing ones
-        if !pending_remote_change_ids.is_empty() {
-            let missing_remote_changes: Vec<_> = all_remote_changes.into_iter()
-                .filter(|change| pending_remote_change_ids.contains(&&change.change.id))
-                .collect();
-            
-            if !missing_remote_changes.is_empty() {
-                local.append_changes(missing_remote_changes)?;
-            }
-        }
-
         // 3. For any local change_id not in the remote set, upload it
-        let missing_local_change_ids = local_change_ids.iter()
+        let change_ids_to_push = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
-        log::info!("Sync: Uploading {} new changes.", missing_local_change_ids.len());
-        
-        // Get all local changes and filter to only the missing ones
-        if !missing_local_change_ids.is_empty() {
-            let all_local_changes = local.get_changes_after(None)?;
-            let missing_local_changes: Vec<_> = all_local_changes.into_iter()
-                .filter(|change| missing_local_change_ids.contains(&&change.change.id))
-                .collect();
-            
-            if !missing_local_changes.is_empty() {
-                remote.append_changes(missing_local_changes)?;
-            }
-        }
+        log::info!("Sync: Pushing {} new changes.", change_ids_to_push.len());
+        let push_min = change_ids_to_push.iter().min().cloned().map(|s| s.as_str());
+        let push_max = change_ids_to_push.iter().max().cloned().map(|s| s.as_str());
+        let changes_to_push = local.get_changes(push_min, push_max)?;
+        remote.append_changes(changes_to_push)?;
 
         log::info!("Sync: Done. =============");
         Ok(())
@@ -91,13 +76,13 @@ impl SyncEngine {
 
     /// Sync using the generic sync algorithm with DbChangelog and BatchingStorageChangelog
     pub fn sync(&self, db: &Db) -> Result<()> {
-        use crate::changelog::{DbChangelog, BatchingStorageChangelog};
+        use crate::changelog::{DbChangelog};
         
         let local_changelog = DbChangelog::new(db.clone());
-        let remote_changelog = BatchingStorageChangelog::new(self.storage.as_ref(), self.prefix.clone());
+        let remote_changelog = BasicStorageChangelog::new(self.storage.as_ref(), self.prefix.clone());
         
         // Use the generic sync algorithm
-        GenericSyncEngine::sync(&local_changelog, &remote_changelog)?;
+        Ok(GenericSyncEngine::sync(&local_changelog, &remote_changelog)?)
     }
 
 }
