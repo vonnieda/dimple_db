@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use rmpv::Value as MsgPackValue;
 
-use crate::{changelog::{BasicStorageChangelog, Changelog}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
+use crate::{changelog::{BatchingStorageChangelog, Changelog}, storage::{EncryptedStorage, InMemoryStorage, LocalStorage, S3Storage, SyncStorage}, Db};
 
 pub struct SyncEngine {
     storage: Box<dyn SyncStorage>,
@@ -41,20 +41,24 @@ impl GenericSyncEngine {
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::info!("Sync: Pulling {} new changes.", change_ids_to_pull.len());
-        let pull_min = change_ids_to_pull.iter().min().cloned().map(|s| s.as_str());
-        let pull_max = change_ids_to_pull.iter().max().cloned().map(|s| s.as_str());
-        let pulled_changes = remote.get_changes(pull_min, pull_max)?;
-        local.append_changes(pulled_changes)?;
+        if !change_ids_to_pull.is_empty() {
+            let pull_min = change_ids_to_pull.iter().min().cloned().map(|s| s.as_str());
+            let pull_max = change_ids_to_pull.iter().max().cloned().map(|s| s.as_str());
+            let pulled_changes = remote.get_changes(pull_min, pull_max)?;
+            local.append_changes(pulled_changes)?;
+        }
         
         // 3. For any local change_id not in the remote set, upload it
         let change_ids_to_push = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::info!("Sync: Pushing {} new changes.", change_ids_to_push.len());
-        let push_min = change_ids_to_push.iter().min().cloned().map(|s| s.as_str());
-        let push_max = change_ids_to_push.iter().max().cloned().map(|s| s.as_str());
-        let changes_to_push = local.get_changes(push_min, push_max)?;
-        remote.append_changes(changes_to_push)?;
+        if !change_ids_to_push.is_empty() {
+            let push_min = change_ids_to_push.iter().min().cloned().map(|s| s.as_str());
+            let push_max = change_ids_to_push.iter().max().cloned().map(|s| s.as_str());
+            let changes_to_push = local.get_changes(push_min, push_max)?;
+            remote.append_changes(changes_to_push)?;
+        }
 
         log::info!("Sync: Done. =============");
         Ok(())
@@ -79,7 +83,7 @@ impl SyncEngine {
         use crate::changelog::{DbChangelog};
         
         let local_changelog = DbChangelog::new(db.clone());
-        let remote_changelog = BasicStorageChangelog::new(self.storage.as_ref(), self.prefix.clone());
+        let remote_changelog = BatchingStorageChangelog::new(self.storage.as_ref(), self.prefix.clone());
         
         // Use the generic sync algorithm
         Ok(GenericSyncEngine::sync(&local_changelog, &remote_changelog)?)
