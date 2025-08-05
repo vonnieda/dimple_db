@@ -62,8 +62,9 @@ impl SyncStorage for EncryptedStorage {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::InMemoryStorage;
+
     use super::*;
-    use crate::sync::storage::InMemoryStorage;
 
     #[test]
     #[ignore]

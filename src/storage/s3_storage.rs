@@ -46,7 +46,29 @@ impl SyncStorage for S3Storage {
     fn get(&self, path: &str) -> Result<Vec<u8>> {
         log::debug!("STORAGE GET: path='{}'", path);
         let response = self.bucket.get_object(path)?;
+        
+        // Check response status
+        if response.status_code() != 200 {
+            log::error!("STORAGE GET ERROR: S3 returned status {} for path '{}'", response.status_code(), path);
+            return Err(anyhow::anyhow!("S3 returned error status {} for path: {}", response.status_code(), path));
+        }
+        
         let bytes = response.bytes().to_vec();
+        
+        // Check if we got an HTML error page instead of actual content
+        if bytes.len() > 0 && bytes[0] == b'<' {
+            log::error!("STORAGE GET ERROR: Received HTML response (likely an error page) for path '{}'. Content starts with: {:?}", 
+                       path, String::from_utf8_lossy(&bytes[..std::cmp::min(100, bytes.len())]));
+            return Err(anyhow::anyhow!("S3 returned HTML error page instead of file content for path: {}", path));
+        }
+        
+        // Check if we got XML error response (common for S3 errors)
+        if bytes.len() > 5 && &bytes[0..5] == b"<?xml" {
+            log::error!("STORAGE GET ERROR: Received XML response (likely an error) for path '{}'. Content starts with: {:?}", 
+                       path, String::from_utf8_lossy(&bytes[..std::cmp::min(200, bytes.len())]));
+            return Err(anyhow::anyhow!("S3 returned XML error response instead of file content for path: {}", path));
+        }
+        
         log::debug!("STORAGE GET RESULT: {} bytes", bytes.len());
         Ok(bytes)
     }

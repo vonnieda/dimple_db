@@ -4,7 +4,7 @@ use serde_rusqlite::NamedParamSlice;
 use uuid::Uuid;
 use std::cell::RefCell;
 
-use crate::db::{changelog, types::DbEvent, Db, Entity};
+use crate::db::{Db, DbEvent, Entity};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
@@ -76,7 +76,7 @@ impl<'a> DbTransaction<'a> {
         
         // Track changes
         if track_changes {
-            changelog::track_changes(self, &table_name, &id, old_value.as_ref(), 
+            crate::changelog::track_changes(self, &table_name, &id, old_value.as_ref(), 
                 &new_value, &column_names)?;
         }
         
