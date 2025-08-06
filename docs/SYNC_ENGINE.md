@@ -10,6 +10,15 @@ providing a global order across all replicas.
 are not on the remote, and pulls any that are on the remote and not local.
 5. After a sync, any new local changelogs are merged into the entity tables.
 
+## Changelog Abstraction
+
+The sync engine uses a `Changelog` trait that provides a unified interface for change tracking.
+There are multiple implementations:
+
+- **DbChangelog**: Reads/writes changes directly from/to the database tables
+- **BasicStorageChangelog**: Simple storage-based changelog (one file per change)
+- **BatchingStorageChangelog**: Optimized implementation that batches changes for efficiency
+
 ## Conflict Resolution
 
 The Sync Engine treats the database tables as grow only lists and the columns
@@ -18,22 +27,51 @@ be handled at the user level with tombstones.
 
 # Sync Storage
 
-Each replica stores one or more change files in the storage.
+The sync engine supports multiple storage implementations through the `SyncStorage` trait:
+- S3 and S3-compatible storage (primary target)
+- Local filesystem storage
+- In-memory storage (for testing)
+- Encrypted storage wrapper using age encryption
 
-Each change file contains a `RemoteChangeRecord` which combines:
+## Storage Formats
+
+### Basic Storage Format
+Each change is stored as an individual file containing a `RemoteChangeRecord` which combines:
 - One record from the ZV_CHANGE table (change metadata)
 - Associated records from ZV_CHANGE_FIELD table (individual field changes)
+
+### Batching Storage Format (Optimized)
+To improve sync performance and reduce memory usage for large datasets, the `BatchingStorageChangelog`
+implementation groups changes into batches:
+
+- **Manifests**: Map change IDs to batch IDs (one per author)
+- **Batches**: Contain the actual change data (limited to 100MB per batch)
+- Automatically splits large sync operations into manageable chunks
+- Prevents memory exhaustion when syncing large datasets
 
 
 ## Directory Structure
 
+### Basic Storage Layout
 ```
-s3://endpoint/bucket/base_path/ or
-file://base_path or
-memory://base_path
+storage_root/
 └── changes/
-	└── {change_uuid}.msgpack
+    └── {change_uuid}.msgpack
 ```
+
+### Batching Storage Layout
+```
+storage_root/
+├── manifests/         # Maps change IDs to batch IDs
+│   └── {author_id}.msgpack
+└── batches/           # Contains batched change data
+    └── {batch_uuid}.msgpack
+```
+
+Storage paths support multiple protocols:
+- `s3://endpoint/bucket/base_path/`
+- `file://base_path/`
+- `memory://base_path/`
 
 
 # Sync Schema
@@ -68,7 +106,7 @@ CREATE TABLE IF NOT EXISTS ZV_CHANGE_FIELD (
 
 ## Data Structures
 
-### Change File Format
+### Basic Change File Format
 
 Stored in `changes/{change_uuid}.msgpack` using MessagePack binary format:
 
@@ -98,3 +136,34 @@ Stored in `changes/{change_uuid}.msgpack` using MessagePack binary format:
   ]
 }
 ```
+
+### Batching Format Structures
+
+**Manifest File** (`manifests/{author_id}.msgpack`):
+Maps change IDs to their corresponding batch IDs:
+```json
+{
+  "change-001": "batch-uuid-1",
+  "change-002": "batch-uuid-1",
+  "change-003": "batch-uuid-2",
+  ...
+}
+```
+
+**Batch File** (`batches/{batch_uuid}.msgpack`):
+Contains an array of changes (same format as basic change files):
+```json
+[
+  {
+    "change": { ... },
+    "fields": [ ... ]
+  },
+  {
+    "change": { ... },
+    "fields": [ ... ]
+  },
+  ...
+]
+```
+
+Batches are automatically split when they exceed 100MB to prevent memory issues during sync operations.
