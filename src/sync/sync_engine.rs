@@ -37,27 +37,33 @@ impl GenericSyncEngine {
             local_change_ids.len(), remote_change_ids.len());
 
         // 2. For any remote change_id not in the local set, download and append it
-        let change_ids_to_pull = remote_change_ids.iter()
+        let mut change_ids_to_pull = remote_change_ids.iter()
             .filter(|id| !local_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::info!("Sync: Pulling {} new changes.", change_ids_to_pull.len());
         if !change_ids_to_pull.is_empty() {
-            let pull_min = change_ids_to_pull.iter().min().cloned().map(|s| s.as_str());
-            let pull_max = change_ids_to_pull.iter().max().cloned().map(|s| s.as_str());
-            let pulled_changes = remote.get_changes(pull_min, pull_max)?;
-            local.append_changes(pulled_changes)?;
+            change_ids_to_pull.sort();
+            for change_ids_to_pull in change_ids_to_pull.chunks(100) {
+                let pull_min = change_ids_to_pull.iter().min().cloned().map(|s| s.as_str());
+                let pull_max = change_ids_to_pull.iter().max().cloned().map(|s| s.as_str());
+                let pulled_changes = remote.get_changes(pull_min, pull_max)?;
+                local.append_changes(pulled_changes)?;
+            }
         }
         
         // 3. For any local change_id not in the remote set, upload it
-        let change_ids_to_push = local_change_ids.iter()
+        let mut change_ids_to_push = local_change_ids.iter()
             .filter(|id| !remote_change_ids.contains(*id))
             .collect::<Vec<_>>();
         log::info!("Sync: Pushing {} new changes.", change_ids_to_push.len());
         if !change_ids_to_push.is_empty() {
-            let push_min = change_ids_to_push.iter().min().cloned().map(|s| s.as_str());
-            let push_max = change_ids_to_push.iter().max().cloned().map(|s| s.as_str());
-            let changes_to_push = local.get_changes(push_min, push_max)?;
-            remote.append_changes(changes_to_push)?;
+            change_ids_to_push.sort();
+            for change_ids_to_push in change_ids_to_push.chunks(100) {
+                let push_min = change_ids_to_push.iter().min().cloned().map(|s| s.as_str());
+                let push_max = change_ids_to_push.iter().max().cloned().map(|s| s.as_str());
+                let changes_to_push = local.get_changes(push_min, push_max)?;
+                remote.append_changes(changes_to_push)?;
+            }
         }
 
         log::info!("Sync: Done. =============");
