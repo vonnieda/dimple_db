@@ -7,10 +7,11 @@ use rusqlite::Params;
 use crate::db::{Db, Entity, DbEvent};
 
 /// Handle returned to the user for managing a query subscription
+#[derive(Clone)]
 pub struct QuerySubscription {
     stop_signal: Option<Sender<()>>,
     refresh_signal: Option<Sender<()>>,
-    thread_handle: Option<JoinHandle<()>>,
+    thread_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl QuerySubscription {
@@ -50,7 +51,18 @@ impl QuerySubscription {
                     break;
                 }
                 
-                let refresh = refresh_rx.try_recv().is_ok();
+                // TODO should be using crossbeam::select!() or something
+                if refresh_rx.try_recv().is_ok() {
+                    // Re-run the query
+                    match db_clone.query::<E, _>(sql_clone.as_str(), params_clone.clone()) {
+                        Ok(results) => {
+                            if let Ok(mut cb) = callback_clone.lock() {
+                                cb(results);
+                            }
+                        },
+                        Err(e) => eprintln!("Error re-running query: {}", e),
+                    }
+                }
 
                 // Check for database events (with timeout to allow periodic stop checks)
                 // TODO I think we can drop the timeout by ensuring the sender gets dropped
@@ -63,7 +75,7 @@ impl QuerySubscription {
                             DbEvent::Update(table, _) => table,
                         };
                         
-                        if refresh || tables_clone.contains(table_name) {
+                        if tables_clone.contains(table_name) {
                             // Re-run the query
                             match db_clone.query::<E, _>(sql_clone.as_str(), params_clone.clone()) {
                                 Ok(results) => {
@@ -89,7 +101,7 @@ impl QuerySubscription {
         
         Ok(QuerySubscription {
             stop_signal: Some(stop_tx),
-            thread_handle: Some(thread_handle),
+            thread_handle: Arc::new(Mutex::new(Some(thread_handle))),
             refresh_signal: Some(refresh_tx),
         })
     }
@@ -101,7 +113,7 @@ impl QuerySubscription {
         }
         
         // Wait for the thread to finish
-        if let Some(handle) = self.thread_handle.take() {
+        if let Some(handle) = self.thread_handle.lock().unwrap().take() {
             let _ = handle.join(); // Ignore error if thread panicked
         }
     }
