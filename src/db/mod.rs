@@ -3,6 +3,7 @@ pub mod query;
 pub mod transaction;
 
 pub use core::*;
+pub use query::*;
 pub use rusqlite_migration::*;
 
 use serde::{Serialize, de::DeserializeOwned};

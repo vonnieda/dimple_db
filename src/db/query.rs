@@ -9,6 +9,7 @@ use crate::db::{Db, Entity, DbEvent};
 /// Handle returned to the user for managing a query subscription
 pub struct QuerySubscription {
     stop_signal: Option<Sender<()>>,
+    refresh_signal: Option<Sender<()>>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -30,6 +31,7 @@ impl QuerySubscription {
         
         // Create stop signal channel
         let (stop_tx, stop_rx) = channel::<()>();
+        let (refresh_tx, refresh_rx) = channel::<()>();
         
         // Clone values needed for the thread
         let db_clone = db.clone();
@@ -48,7 +50,11 @@ impl QuerySubscription {
                     break;
                 }
                 
+                let refresh = refresh_rx.try_recv().is_ok();
+
                 // Check for database events (with timeout to allow periodic stop checks)
+                // TODO I think we can drop the timeout by ensuring the sender gets dropped
+                // when the subscription is closed. Probably simplifies a lot of this.
                 match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                     Ok(event) => {
                         // Check if this event affects our query
@@ -57,7 +63,7 @@ impl QuerySubscription {
                             DbEvent::Update(table, _) => table,
                         };
                         
-                        if tables_clone.contains(table_name) {
+                        if refresh || tables_clone.contains(table_name) {
                             // Re-run the query
                             match db_clone.query::<E, _>(sql_clone.as_str(), params_clone.clone()) {
                                 Ok(results) => {
@@ -84,6 +90,7 @@ impl QuerySubscription {
         Ok(QuerySubscription {
             stop_signal: Some(stop_tx),
             thread_handle: Some(thread_handle),
+            refresh_signal: Some(refresh_tx),
         })
     }
 
@@ -101,6 +108,12 @@ impl QuerySubscription {
 }
 
 impl QuerySubscription {
+    pub fn refresh(&self) {
+        if let Some(refresh_tx) = &self.refresh_signal {
+            let _ = refresh_tx.send(());
+        }
+    }
+
     /// Extracts table names from a SQL query.
     /// Uses a simple regex-based approach to find table names in FROM and JOIN clauses.
     pub fn extract_query_tables(sql: &str) -> Result<HashSet<String>> {
