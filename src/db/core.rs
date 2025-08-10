@@ -108,6 +108,10 @@ impl Db {
         Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
 
+    pub fn find<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Option<T>> {
+        Ok(self.query(sql, params)?.into_iter().next())
+    }
+
     /// Get the database's unique UUIDv7. This is created when the database is
     /// first initialized and never changes.
     pub fn get_database_uuid(&self) -> Result<String> {
@@ -253,6 +257,65 @@ mod tests {
         assert!(result.is_none());
         Ok(())
     }
+
+    #[test]
+    fn find_returns_first_matching_entity() -> Result<()> {
+        let db = setup_db()?;
+        
+        // Save some test artists
+        db.save(&Artist { name: "Beatles".to_string(), summary: Some("British rock band".to_string()), ..Default::default() })?;
+        db.save(&Artist { name: "Pink Floyd".to_string(), summary: Some("Progressive rock".to_string()), ..Default::default() })?;
+        db.save(&Artist { name: "Radiohead".to_string(), summary: Some("Alternative rock".to_string()), ..Default::default() })?;
+        
+        // Test finding by name
+        let found: Option<Artist> = db.find("SELECT * FROM Artist WHERE name = ?", ["Beatles"])?;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Beatles");
+        
+        // Test finding by partial name match
+        let found: Option<Artist> = db.find("SELECT * FROM Artist WHERE name LIKE ? ORDER BY name", ["P%"])?;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "Pink Floyd"); // Should be first alphabetically
+        
+        // Test finding with no matches
+        let found: Option<Artist> = db.find("SELECT * FROM Artist WHERE name = ?", ["Nonexistent"])?;
+        assert!(found.is_none());
+        
+        Ok(())
+    }
+
+    #[test]
+    fn find_in_transaction() -> Result<()> {
+        let db = setup_db()?;
+        
+        db.transaction(|txn| -> Result<()> {
+            // Save an artist in the transaction
+            let saved = txn.save(&Artist { 
+                name: "The Beatles".to_string(), 
+                summary: Some("Legendary band".to_string()), 
+                ..Default::default() 
+            })?;
+            
+            // Find it using the transaction's find method
+            let found: Option<Artist> = txn.find("SELECT * FROM Artist WHERE id = ?", [&saved.id])?;
+            assert!(found.is_some());
+            assert_eq!(found.unwrap().name, "The Beatles");
+            
+            // Test finding with complex query
+            let found: Option<Artist> = txn.find(
+                "SELECT * FROM Artist WHERE name LIKE ? AND summary IS NOT NULL", 
+                ["%Beatles%"]
+            )?;
+            assert!(found.is_some());
+            assert_eq!(found.unwrap().summary, Some("Legendary band".to_string()));
+            
+            Ok(())
+        })?;
+        
+        Ok(())
+    }
+
+    
 
     // Schema Handling
     #[test]
