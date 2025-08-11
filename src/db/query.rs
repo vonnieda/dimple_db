@@ -20,6 +20,7 @@ impl QuerySubscription {
     fn calculate_hash<E: Serialize>(results: &[E]) -> u64 {
         let mut hasher = DefaultHasher::new();
         // Serialize the results to ensure we capture all data
+        // TODO change to something faster
         if let Ok(serialized) = serde_json::to_string(results) {
             serialized.hash(&mut hasher);
         }

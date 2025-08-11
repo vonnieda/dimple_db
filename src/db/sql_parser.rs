@@ -89,6 +89,17 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, tables: &mut HashSet<String>
 }
 
 fn extract_tables_from_select(select: &Select, tables: &mut HashSet<String>) {
+    // Extract from SELECT clause (projection list) for subqueries
+    for select_item in &select.projection {
+        match select_item {
+            sqlparser::ast::SelectItem::UnnamedExpr(expr) |
+            sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                extract_tables_from_expr(expr, tables);
+            },
+            _ => {}
+        }
+    }
+    
     // Extract from FROM clause
     for table_with_joins in &select.from {
         extract_tables_from_table_with_joins(table_with_joins, tables);
@@ -310,5 +321,31 @@ mod tests {
         // This should return an error from the parser
         let result = extract_query_tables("SELECT * FORM Artist");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_count_subqueries() {
+        let sql = "SELECT
+            (SELECT COUNT(*) FROM Artist) as artist_count,
+            (SELECT COUNT(*) FROM Release) as release_count,
+            (SELECT COUNT(*) FROM Track) as track_count,
+            (SELECT COUNT(*) FROM TrackSource) as track_source_count,
+            (SELECT COUNT(*) FROM Playlist) as playlist_count,
+            (SELECT COUNT(*) FROM Genre) as genre_count,
+            (SELECT COUNT(*) FROM Dimage) as dimage_count,
+            (SELECT COUNT(*) FROM Link) as link_count,
+            (SELECT COUNT(*) FROM ZV_CHANGE) as change_count
+        ";
+        let tables = extract_query_tables(sql).unwrap();
+        assert_eq!(tables.len(), 9);
+        assert!(tables.contains("Artist"));
+        assert!(tables.contains("Release"));
+        assert!(tables.contains("Track"));
+        assert!(tables.contains("TrackSource"));
+        assert!(tables.contains("Playlist"));
+        assert!(tables.contains("Genre"));
+        assert!(tables.contains("Dimage"));
+        assert!(tables.contains("Link"));
+        assert!(tables.contains("ZV_CHANGE"));
     }
 }
