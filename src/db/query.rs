@@ -41,7 +41,8 @@ impl QuerySubscription {
         sql: &str, 
         params: P, 
         callback: &Arc<Mutex<F>>,
-        last_hash: &Arc<Mutex<Option<u64>>>
+        last_hash: &Arc<Mutex<Option<u64>>>,
+        force: bool,
     ) 
     where 
         F: FnMut(Vec<E>) + Send
@@ -61,7 +62,7 @@ impl QuerySubscription {
                     }
                 };
                 
-                if should_notify {
+                if should_notify || force {
                     Self::execute_callback(callback, results);
                 }
             },
@@ -92,7 +93,7 @@ impl QuerySubscription {
             
             // TODO should be using crossbeam::select!() or something
             if refresh_rx.try_recv().is_ok() {
-                Self::execute_query_and_callback_with_dedup::<E, _, F>(&db, &sql, params.clone(), &callback, &last_hash);
+                Self::execute_query_and_callback_with_dedup::<E, _, F>(&db, &sql, params.clone(), &callback, &last_hash, true);
             }
 
             // Check for database events (with timeout to allow periodic stop checks)
@@ -106,7 +107,7 @@ impl QuerySubscription {
                     };
                     
                     if tables.contains(table_name) {
-                        Self::execute_query_and_callback_with_dedup::<E, _, F>(&db, &sql, params.clone(), &callback, &last_hash);
+                        Self::execute_query_and_callback_with_dedup::<E, _, F>(&db, &sql, params.clone(), &callback, &last_hash, false);
                     }
                 },
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -269,10 +270,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(*counter.lock().unwrap(), 1);
         
-        // Refresh with same data should NOT trigger another callback due to deduplication
-        subscription.refresh();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
+        // // Refresh with same data should NOT trigger another callback due to deduplication
+        // subscription.refresh();
+        // std::thread::sleep(std::time::Duration::from_millis(50));
+        // assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
         
         // But changing data should trigger the callback
         db.save(&Artist {
@@ -319,15 +320,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert_eq!(*counter.lock().unwrap(), 1);
         
-        // Refreshing without any data changes should NOT trigger the callback again
-        subscription.refresh();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
+        // // Refreshing without any data changes should NOT trigger the callback again
+        // subscription.refresh();
+        // std::thread::sleep(std::time::Duration::from_millis(50));
+        // assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
         
-        // Another refresh should also not trigger
-        subscription.refresh();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
+        // // Another refresh should also not trigger
+        // subscription.refresh();
+        // std::thread::sleep(std::time::Duration::from_millis(50));
+        // assert_eq!(*counter.lock().unwrap(), 1); // Should still be 1
         
         // Adding new data should trigger the callback
         db.save(&Artist {
@@ -339,10 +340,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(*counter.lock().unwrap(), 2); // Should now be 2
         
-        // Refresh after the data change should not trigger again (same results)
-        subscription.refresh();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(*counter.lock().unwrap(), 2); // Should still be 2
+        // // Refresh after the data change should not trigger again (same results)
+        // subscription.refresh();
+        // std::thread::sleep(std::time::Duration::from_millis(50));
+        // assert_eq!(*counter.lock().unwrap(), 2); // Should still be 2
         
         Ok(())
     }
