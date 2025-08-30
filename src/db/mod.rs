@@ -1,5 +1,6 @@
 pub mod core;
 pub mod query;
+pub mod sql_parser;
 pub mod transaction;
 
 pub use core::*;

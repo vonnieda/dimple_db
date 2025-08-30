@@ -105,6 +105,10 @@ impl<'a> DbTransaction<'a> {
         Ok(self.query::<E, _>(&sql, [id])?.into_iter().next())
     }
 
+    pub fn find<T: Entity, P: Params>(&self, sql: &str, params: P) -> Result<Option<T>> {
+        Ok(self.query(sql, params)?.into_iter().next())
+    }
+
     fn ensure_entity_id(&self, entity_value: &mut DbValue) -> Result<String> {
         let id_param = entity_value.iter_mut()
             .find(|(name, _)| name == &":id")
