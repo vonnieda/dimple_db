@@ -84,8 +84,8 @@ It is designed to use simple file storage with no API requirements to avoid
 cloud vendor lock-in. 
 
 The primary target is S3 compatible storage. Connectors are also included for
-in memory and local file storage. Changes are pushed and pulled in compact
-MessagePack files, which are encrypted with [age](https://github.com/FiloSottile/age). 
+in memory and local file storage. Changes are pushed and pulled in MessagePack
+files, which are encrypted with [age](https://github.com/FiloSottile/age).
 
 Merge conflicts are automatically resolved last-write-wins at the attribute
 level.
@@ -137,6 +137,10 @@ open source software full time:
 - [Willow](https://willowprotocol.org)
 - [Willow Compared](https://willowprotocol.org/more/compare/index.html#willow_compared)
 - [Willow Sideloading](https://willowprotocol.org/specs/sideloading/index.html#sideloading)
+- https://transactional.blog/blog/2024-data-replication-design-spectrum
+- https://transactional.blog/talk/enough-with-all-the-raft
+- https://raft.github.io/
+
 
 ### Local First
 - [Local First Landscape](https://www.localfirst.fm/landscape)
@@ -150,7 +154,15 @@ open source software full time:
 - [LiveStore](https://github.com/livestorejs/livestore)	
 - [TinyBase](https://github.com/tinyplex/tinybase)	
 - [Dolthub](https://github.com/dolthub/dolt)
+- [Evolu](https://github.com/evoluhq/evolu)
+- [Syncrotron](https://github.com/evelant/synchrotron)
+- [SQLite Sync](https://github.com/sqliteai/sqlite-sync)
+- [OrbitDB](https://github.com/orbitdb/orbitdb)
+- [OrbitDB](https://github.com/orbitdb/orbitdb)
+- [GuardianDB](https://github.com/wmaslonek/guardian-db)
 
+### Articles
+- [Lessons learned from building a sync-engine and reactivity system with SQLite](https://www.finkelstein.fr/sqlite-sync-engine-with-reactivity)
 
 ## License
 DimpleDb is licensed under the [MIT License](https://mit-license.org/).
