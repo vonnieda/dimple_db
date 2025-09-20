@@ -4,7 +4,7 @@ use serde_rusqlite::NamedParamSlice;
 use uuid::Uuid;
 use std::cell::RefCell;
 
-use crate::db::{Db, DbEvent, Entity};
+use crate::db::{Db, DbEvent, DbEventOperation, Entity};
 
 pub struct DbTransaction<'a> {
     db: &'a Db,
@@ -81,10 +81,10 @@ impl<'a> DbTransaction<'a> {
         }
         
         // Queue event for notification after commit
-        let event = if exists {
-            DbEvent::Update(table_name.clone(), id.clone())
-        } else {
-            DbEvent::Insert(table_name.clone(), id.clone())
+        let event = DbEvent {
+            operation: if exists { DbEventOperation::Update } else {DbEventOperation::Insert },
+            entity_type: table_name.clone(),
+            entity_id: id.clone(),
         };
         self.pending_events.borrow_mut().push(event);
         

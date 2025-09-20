@@ -102,9 +102,7 @@ impl QuerySubscription {
             match event_rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(event) => {
                     // Check if this event affects our query
-                    let table_name = match &event {
-                        DbEvent::Insert(table, _) | DbEvent::Update(table, _) => table,
-                    };
+                    let table_name = &event.entity_type;
                     
                     if tables.contains(table_name) {
                         Self::execute_query_and_callback_with_dedup::<E, _, F>(&db, &sql, params.clone(), &callback, &last_hash, false);

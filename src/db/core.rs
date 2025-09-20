@@ -204,7 +204,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::db::{Db, DbEvent};
+    use crate::db::{Db, DbEvent, DbEventOperation};
 
     fn setup_db() -> Result<Db> {
         let db = Db::open_memory()?;
@@ -363,13 +363,9 @@ mod tests {
         let artist = db.save(&Artist { name: "Radiohead".to_string(), ..Default::default() })?;
         
         let event = receiver.recv_timeout(Duration::from_millis(100))?;
-        match event {
-            DbEvent::Insert(table_name, entity_id) => {
-                assert_eq!(table_name, "Artist");
-                assert_eq!(entity_id, artist.id);
-            }
-            _ => panic!("Expected Insert event"),
-        }
+        assert_eq!(event.operation, DbEventOperation::Insert);
+        assert_eq!(event.entity_type, "Artist");
+        assert_eq!(event.entity_id, artist.id);
         Ok(())
     }
 
@@ -386,13 +382,9 @@ mod tests {
         })?;
         
         let event = receiver.recv_timeout(Duration::from_millis(100))?;
-        match event {
-            DbEvent::Update(table_name, entity_id) => {
-                assert_eq!(table_name, "Artist");
-                assert_eq!(entity_id, artist.id);
-            }
-            _ => panic!("Expected Update event"),
-        }
+        assert_eq!(event.operation, DbEventOperation::Update);
+        assert_eq!(event.entity_type, "Artist");
+        assert_eq!(event.entity_id, artist.id);
         Ok(())
     }
 

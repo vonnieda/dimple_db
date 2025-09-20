@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{changelog::{Changelog, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, sync::sync_engine, Db};
+use crate::{changelog::{Changelog, ChangelogChange, ChangelogChangeWithFields, RemoteFieldRecord}, db::DbEventOperation, sync::sync_engine, Db};
 
 use rusqlite::{Connection, OptionalExtension as _};
 use uuid::Uuid;
@@ -449,7 +449,11 @@ fn apply_entity_updates(txn: &DbTransaction, entity_type: &str, entity_id: &str,
         txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
         
         // Queue update event for notification
-        txn.add_pending_event(DbEvent::Update(entity_type.to_string(), entity_id.to_string()));
+        txn.add_pending_event(DbEvent {
+            operation: DbEventOperation::Update,
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+        });
     } else {
         // Build INSERT statement
         let mut insert_columns = vec!["id"];
@@ -474,7 +478,11 @@ fn apply_entity_updates(txn: &DbTransaction, entity_type: &str, entity_id: &str,
         txn.txn().execute(&sql, rusqlite::params_from_iter(params))?;
         
         // Queue insert event for notification
-        txn.add_pending_event(DbEvent::Insert(entity_type.to_string(), entity_id.to_string()));
+        txn.add_pending_event(DbEvent {
+            operation: DbEventOperation::Insert,
+            entity_type: entity_type.to_string(),
+            entity_id: entity_id.to_string(),
+        });
     }
 
     Ok(())

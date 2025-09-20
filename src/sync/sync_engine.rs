@@ -191,7 +191,7 @@ impl SyncEngineBuilder {
 mod tests {
     use rusqlite_migration::{Migrations, M};
     use serde::{Deserialize, Serialize};
-    use crate::{changelog::ChangelogChange, db::DbEvent, sync::SyncEngine, Db};
+    use crate::{changelog::ChangelogChange, db::{DbEvent, DbEventOperation}, sync::SyncEngine, Db};
 
     #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
     struct Artist {
@@ -580,13 +580,9 @@ mod tests {
         
         // Check that we received an insert notification
         let event = receiver.recv_timeout(Duration::from_secs(1))?;
-        match event {
-            DbEvent::Insert(entity_type, entity_id) => {
-                assert_eq!(entity_type, "Artist");
-                assert_eq!(entity_id, artist.id);
-            }
-            _ => panic!("Expected Insert event, got {:?}", event),
-        }
+        assert_eq!(event.operation, DbEventOperation::Insert);
+        assert_eq!(event.entity_type, "Artist");
+        assert_eq!(event.entity_id, artist.id);
         
         // Now update the artist in db1
         let mut updated_artist = artist.clone();
@@ -601,13 +597,9 @@ mod tests {
         
         // Check for update notification
         let event = receiver.recv_timeout(Duration::from_secs(1))?;
-        match event {
-            DbEvent::Update(entity_type, entity_id) => {
-                assert_eq!(entity_type, "Artist");
-                assert_eq!(entity_id, artist.id);
-            }
-            _ => panic!("Expected Update event, got {:?}", event),
-        }
+        assert_eq!(event.operation, DbEventOperation::Update);
+        assert_eq!(event.entity_type, "Artist");
+        assert_eq!(event.entity_id, artist.id);
         
         Ok(())
     }
