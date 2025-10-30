@@ -160,6 +160,7 @@ open source software full time:
 - [OrbitDB](https://github.com/orbitdb/orbitdb)
 - [GuardianDB](https://github.com/wmaslonek/guardian-db)
 - [Eidetica](https://github.com/arcuru/eidetica)
+- https://github.com/byearlybird/starling
 
 ### Articles
 - [Lessons learned from building a sync-engine and reactivity system with SQLite](https://www.finkelstein.fr/sqlite-sync-engine-with-reactivity)
