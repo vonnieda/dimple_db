@@ -160,10 +160,11 @@ open source software full time:
 - [OrbitDB](https://github.com/orbitdb/orbitdb)
 - [GuardianDB](https://github.com/wmaslonek/guardian-db)
 - [Eidetica](https://github.com/arcuru/eidetica)
-- https://github.com/byearlybird/starling
+- [Starling](https://github.com/byearlybird/starling)
 
 ### Articles
 - [Lessons learned from building a sync-engine and reactivity system with SQLite](https://www.finkelstein.fr/sqlite-sync-engine-with-reactivity)
 - [A New Kind of Web App](https://www.carlassmann.com/blog/new-kind-of-web-app)
+
 ## License
 DimpleDb is licensed under the [MIT License](https://mit-license.org/).
